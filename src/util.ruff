@@ -1,0 +1,176 @@
+# Yard :: util
+#
+# Small, dependency-free helpers shared across the tool. Kept deliberately
+# boring so the rest of the codebase can rely on it without surprises. None of
+# these touch the network, the filesystem, or any process.
+
+# Truthiness for the 1/0 predicate builtins (contains / has_key / ...). Some
+# Ruff predicates return 1/0 and some return true/false; normalize both here.
+export func truthy(flag) {
+    return flag == 1 || flag == true
+}
+
+# Current time as an ISO-8601 UTC timestamp, e.g. 2026-05-30T17:08:42Z.
+export func iso_now() {
+    return format_date(now(), "YYYY-MM-DDTHH:mm:ssZ")
+}
+
+# Display a value for human output, mapping null to a dash.
+export func display(value) {
+    if type(value) == "null" {
+        return "-"
+    }
+    return "${value}"
+}
+
+# Display a value, substituting a caller-provided fallback when null/empty.
+export func display_or(value, fallback) {
+    if type(value) == "null" {
+        return fallback
+    }
+    if "${value}" == "" {
+        return fallback
+    }
+    return "${value}"
+}
+
+# Right-pad a string with spaces to `width` for fixed-width table columns.
+# Strings longer than width are returned unchanged (no truncation surprises).
+export func pad_right(text, width) {
+    mut out := "${text}"
+    while len(out) < width {
+        out = out + " "
+    }
+    return out
+}
+
+# Left-pad a string with spaces to `width` (used for right-aligned numbers).
+export func pad_left(text, width) {
+    mut out := "${text}"
+    while len(out) < width {
+        out = " " + out
+    }
+    return out
+}
+
+# Membership test that tolerates the predicate return-type quirks. Works for
+# arrays of strings or numbers.
+# NOTE: helper functions that get called from inside other functions' loops use
+# uniquely-named locals (not i/n). The Ruff VM can let a callee's same-named
+# local clobber the caller's live local when several such helpers are invoked in
+# one hot loop, which silently truncates the caller's iteration. Unique names in
+# the leaf helpers make that impossible.
+export func includes(arr, value) {
+    mut inc_i := 0
+    inc_n := len(arr)
+    while inc_i < inc_n {
+        if arr[inc_i] == value {
+            return true
+        }
+        inc_i = inc_i + 1
+    }
+    return false
+}
+
+# Split a line on runs of whitespace (spaces or tabs), dropping empty tokens.
+# This is what `lsof` / `ps` output needs: columns are whitespace-aligned and
+# the builtin split(s, " ") would otherwise produce empty tokens.
+export func split_ws(line) {
+    mut out := []
+    mut cur := ""
+    mut sw_i := 0
+    sw_n := len(line)
+    while sw_i < sw_n {
+        ch := substring(line, sw_i, sw_i + 1)
+        if ch == " " || ch == "	" {
+            if cur != "" {
+                out = push(out, cur)
+                cur = ""
+            }
+        } else {
+            cur = cur + ch
+        }
+        sw_i = sw_i + 1
+    }
+    if cur != "" {
+        out = push(out, cur)
+    }
+    return out
+}
+
+# The last segment of `s` after splitting on `sep` (e.g. the port in
+# "127.0.0.1:3000" or "[::1]:5000"). Returns "" when `s` is empty.
+export func last_segment(s, sep) {
+    parts := split(s, sep)
+    n := len(parts)
+    if n == 0 {
+        return ""
+    }
+    return parts[n - 1]
+}
+
+# Everything before the final `sep` segment, rejoined (the address part of an
+# "address:port" string). Returns "" when there is no separator.
+export func drop_last_segment(s, sep) {
+    parts := split(s, sep)
+    n := len(parts)
+    if n <= 1 {
+        return ""
+    }
+    mut out := parts[0]
+    mut dl_i := 1
+    while dl_i < n - 1 {
+        out = out + sep + parts[dl_i]
+        dl_i = dl_i + 1
+    }
+    return out
+}
+
+# Lowercase membership: true if `needle` (lowercased) appears anywhere in
+# `haystack` (lowercased). Safe on null inputs.
+export func contains_ci(haystack, needle) {
+    if type(haystack) == "null" || type(needle) == "null" {
+        return false
+    }
+    hay := to_lower("${haystack}")
+    ndl := to_lower("${needle}")
+    return truthy(contains(hay, ndl))
+}
+
+# True if `haystack` contains any of the lowercased substrings in `needles`.
+export func contains_any_ci(haystack, needles) {
+    mut ca_i := 0
+    ca_n := len(needles)
+    while ca_i < ca_n {
+        if contains_ci(haystack, needles[ca_i]) {
+            return true
+        }
+        ca_i = ca_i + 1
+    }
+    return false
+}
+
+# Expand a leading "~" in a path to the user's home directory. Leaves other
+# paths untouched. Used for managed-service cwd values from config.
+export func expand_home(path) {
+    if type(path) == "null" {
+        return null
+    }
+    p := "${path}"
+    if p == "~" {
+        return env_or("HOME", "~")
+    }
+    if len(p) >= 2 && substring(p, 0, 2) == "~/" {
+        home := env_or("HOME", "")
+        if home == "" {
+            return p
+        }
+        return home + substring(p, 1, len(p))
+    }
+    return p
+}
+
+# Round a float to an integer number of milliseconds for display.
+export func to_ms(seconds) {
+    return round(seconds * 1000.0)
+}

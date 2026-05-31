@@ -1,0 +1,212 @@
+# Yard :: config
+#
+# Loads and validates the managed-services config: a local JSON file describing
+# the dev servers Yard is allowed to start, stop, and restart. The config is the
+# *only* source of commands Yard will ever run on your behalf — there is no way
+# to inject an arbitrary command through the API or UI. A missing config is
+# fine (you just get a read-only view of detected ports); an invalid config is
+# surfaced as an error rather than crashed on.
+
+from src.util import truthy, includes, expand_home
+
+# Resolve the config path: explicit arg > $YARD_CONFIG > ./yard.config.json.
+export func resolve_path(explicit) {
+    if type(explicit) != "null" && "${explicit}" != "" {
+        return "${explicit}"
+    }
+    return env_or("YARD_CONFIG", "yard.config.json")
+}
+
+# Load and validate the config at `path`. Always returns a structured result:
+#   { "path": str, "exists": bool, "services": [ServiceConfig...],
+#     "errors": [str...], "warnings": [str...] }
+# `services` only ever contains entries that passed validation, so callers can
+# trust id/name/port to be present.
+export func load(path) {
+    result := {
+        "path": path,
+        "exists": false,
+        "services": [],
+        "errors": [],
+        "warnings": []
+    }
+    if file_exists(path) == false {
+        return result
+    }
+    result["exists"] := true
+
+    raw := read_file(path)
+    mut parsed := null
+    try {
+        parsed = parse_json(raw)
+    } except e {
+        result["errors"] := push(result["errors"], "config is not valid JSON: ${e}")
+        return result
+    }
+    if type(parsed) != "dict" && type(parsed) != "array" {
+        result["errors"] := push(result["errors"], "config is not valid JSON (could not parse ${path})")
+        return result
+    }
+
+    raw_services := extract_services(parsed)
+    if type(raw_services) != "array" {
+        result["errors"] := push(result["errors"], "config 'services' must be an array")
+        return result
+    }
+
+    validated := validate_services(raw_services)
+    result["services"] := validated["services"]
+    result["errors"] := concat_lists(result["errors"], validated["errors"])
+    result["warnings"] := concat_lists(result["warnings"], validated["warnings"])
+    return result
+}
+
+# Accept either {"services": [...]} or a bare top-level array of services.
+func extract_services(parsed) {
+    if type(parsed) == "array" {
+        return parsed
+    }
+    if truthy(has_key(parsed, "services")) {
+        return parsed["services"]
+    }
+    return []
+}
+
+func concat_lists(a, b) {
+    mut out := a
+    mut cl_i := 0
+    cl_n := len(b)
+    while cl_i < cl_n {
+        out = push(out, b[cl_i])
+        cl_i = cl_i + 1
+    }
+    return out
+}
+
+# Validate the raw service entries, normalizing fields and collecting problems.
+func validate_services(raw_services) {
+    mut services := []
+    mut errors := []
+    mut warnings := []
+    mut seen_ids := []
+    mut seen_ports := []
+    mut i := 0
+    n := len(raw_services)
+    while i < n {
+        entry := raw_services[i]
+        idx := i
+        i = i + 1
+        if type(entry) != "dict" {
+            errors = push(errors, "service #${idx} is not an object")
+            continue
+        }
+        if truthy(has_key(entry, "id")) == false {
+            errors = push(errors, "service #${idx} is missing required 'id'")
+            continue
+        }
+        id := "${entry["id"]}"
+        if truthy(has_key(entry, "port")) == false {
+            errors = push(errors, "service '${id}' is missing required 'port'")
+            continue
+        }
+        port := normalize_port(entry["port"])
+        if type(port) != "int" {
+            errors = push(errors, "service '${id}' has a non-numeric 'port'")
+            continue
+        }
+        if includes(seen_ids, id) {
+            warnings = push(warnings, "duplicate service id '${id}' (later entry ignored)")
+            continue
+        }
+        if includes(seen_ports, port) {
+            warnings = push(warnings, "duplicate configured port ${port} (service '${id}')")
+        }
+        seen_ids = push(seen_ids, id)
+        seen_ports = push(seen_ports, port)
+        services = push(services, normalize_service(entry, id, port))
+    }
+    return {"services": services, "errors": errors, "warnings": warnings}
+}
+
+func normalize_port(value) {
+    if type(value) == "int" {
+        return value
+    }
+    if type(value) == "string" {
+        return parse_int(value)
+    }
+    return null
+}
+
+# Build a normalized ServiceConfig with predictable keys, defaulting optional
+# fields to null/sensible values and expanding ~ in cwd.
+func normalize_service(entry, id, port) {
+    return {
+        "id": id,
+        "name": opt(entry, "name", id),
+        "group": opt(entry, "group", "Ungrouped"),
+        "port": port,
+        "cwd": expand_home(opt(entry, "cwd", null)),
+        "start": opt(entry, "start", null),
+        "stop": opt(entry, "stop", null),
+        "health": opt(entry, "health", null),
+        "open": opt(entry, "open", null),
+        "description": opt(entry, "description", null),
+        "sensitive": bool_opt(entry, "sensitive", false),
+        "tags": list_opt(entry, "tags")
+    }
+}
+
+func opt(entry, key, fallback) {
+    if truthy(has_key(entry, key)) {
+        v := entry[key]
+        if type(v) == "null" {
+            return fallback
+        }
+        return v
+    }
+    return fallback
+}
+
+func bool_opt(entry, key, fallback) {
+    if truthy(has_key(entry, key)) {
+        return truthy(entry[key])
+    }
+    return fallback
+}
+
+func list_opt(entry, key) {
+    if truthy(has_key(entry, key)) {
+        v := entry[key]
+        if type(v) == "array" {
+            return v
+        }
+    }
+    return []
+}
+
+# Find a validated service by configured port. Returns the ServiceConfig or null.
+export func service_for_port(services, port) {
+    mut sfp_i := 0
+    sfp_n := len(services)
+    while sfp_i < sfp_n {
+        if services[sfp_i]["port"] == port {
+            return services[sfp_i]
+        }
+        sfp_i = sfp_i + 1
+    }
+    return null
+}
+
+# Find a validated service by id. Returns the ServiceConfig or null.
+export func service_by_id(services, id) {
+    mut sbi_i := 0
+    sbi_n := len(services)
+    while sbi_i < sbi_n {
+        if services[sbi_i]["id"] == id {
+            return services[sbi_i]
+        }
+        sbi_i = sbi_i + 1
+    }
+    return null
+}

@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Yard launcher.
+#
+# Thin convenience wrapper so you can type `yard <command>` instead of
+# `ruff run /path/to/yard.ruff -- <command>`.
+#
+# It runs the Ruff interpreter on the project entrypoint, preserving your
+# current working directory (so the default ./.yard state dir and
+# ./yard.config.json land where you invoke it). Override the interpreter with
+# the RUFF environment variable, e.g.
+#   RUFF=/path/to/ruff/target/release/ruff yard scan
+set -euo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+RUFF="${RUFF:-ruff}"
+
+if ! command -v "$RUFF" >/dev/null 2>&1 && [ ! -x "$RUFF" ]; then
+  echo "yard: cannot find the Ruff interpreter ('$RUFF')." >&2
+  echo "Set RUFF to your ruff binary, e.g. RUFF=/path/to/ruff/target/release/ruff" >&2
+  exit 127
+fi
+
+exec "$RUFF" run "$PROJECT_DIR/yard.ruff" -- "$@"

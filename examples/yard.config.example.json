@@ -1,0 +1,52 @@
+{
+  "services": [
+    {
+      "id": "ruff-site",
+      "name": "Ruff Site",
+      "group": "Ruff/Kujo",
+      "port": 3000,
+      "cwd": "~/code/ruff-site",
+      "start": "npm run dev",
+      "health": "http://127.0.0.1:3000",
+      "open": "http://127.0.0.1:3000",
+      "tags": ["web", "next"],
+      "description": "Marketing + docs site"
+    },
+    {
+      "id": "spiel-app",
+      "name": "Spiel App",
+      "group": "Apps",
+      "port": 5173,
+      "cwd": "~/code/spiel",
+      "start": "cargo run",
+      "health": "http://127.0.0.1:5173",
+      "open": "http://127.0.0.1:5173"
+    },
+    {
+      "id": "api",
+      "name": "Local API",
+      "group": "Backends",
+      "port": 8000,
+      "cwd": "~/code/api",
+      "start": "uvicorn app:app --reload --port 8000",
+      "health": "http://127.0.0.1:8000/health"
+    },
+    {
+      "id": "ollama",
+      "name": "Ollama",
+      "group": "AI",
+      "port": 11434,
+      "start": "ollama serve",
+      "sensitive": true,
+      "description": "Local model server - marked sensitive so it is not stopped by accident"
+    },
+    {
+      "id": "pg",
+      "name": "Postgres (dev)",
+      "group": "Data",
+      "port": 5432,
+      "sensitive": true,
+      "description": "Detected only; no start command, so Yard will never start/restart it"
+    }
+  ]
+}

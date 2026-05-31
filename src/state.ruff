@@ -1,0 +1,115 @@
+# Yard :: state
+#
+# File-backed bookkeeping for services Yard has started. We remember the PID we
+# spawned, when we started it, how many times we've restarted it, and where its
+# logs live. This is the only mutable state Yard keeps, and it lives on disk
+# (default ./.yard) so it survives the dashboard process restarting. Logs for
+# managed services are captured to ./.yard/logs/<id>.log.
+
+from src.util import truthy, iso_now
+
+# Root state directory: $YARD_DIR or ./.yard in the working directory.
+export func state_dir() {
+    return env_or("YARD_DIR", ".yard")
+}
+
+export func logs_dir() {
+    return join_path(state_dir(), "logs")
+}
+
+func state_path() {
+    return join_path(state_dir(), "managed.json")
+}
+
+# Per-service log file (one rolling file per managed service id).
+export func log_path(id) {
+    return join_path(logs_dir(), "${id}.log")
+}
+
+# Create the state + logs directories if needed. Safe to call repeatedly.
+export func ensure_dirs() {
+    sd := state_dir()
+    if path_is_dir(sd) == false {
+        create_dir(sd)
+    }
+    ld := logs_dir()
+    if path_is_dir(ld) == false {
+        create_dir(ld)
+    }
+}
+
+# Load the managed-state map (id -> entry). Returns {} on missing/corrupt file
+# rather than failing, so a bad state file never bricks the dashboard.
+export func load_state() {
+    p := state_path()
+    if file_exists(p) == false {
+        return {}
+    }
+    mut parsed := null
+    try {
+        parsed = parse_json(read_file(p))
+    } except e {
+        return {}
+    }
+    if type(parsed) != "dict" {
+        return {}
+    }
+    return parsed
+}
+
+# Persist the managed-state map. Uses delete-then-write because the VM's
+# write_file overwrite flag is unreliable.
+export func save_state(state) {
+    ensure_dirs()
+    p := state_path()
+    if file_exists(p) {
+        delete_file(p)
+    }
+    write_file(p, to_json_pretty(state))
+}
+
+export func get_entry(state, id) {
+    if truthy(has_key(state, id)) {
+        return state[id]
+    }
+    return null
+}
+
+# A fresh entry for a service Yard has just started.
+export func new_entry(pid, log_file, start_cmd, restart_count) {
+    return {
+        "pid": pid,
+        "started_at": iso_now(),
+        "restart_count": restart_count,
+        "log_file": log_file,
+        "start_cmd": start_cmd,
+        "managed_by_yard": true
+    }
+}
+
+# Tail the last `max_lines` lines of a managed service's log file. Returns an
+# array of strings (possibly empty). Never throws on a missing file.
+export func read_logs(id, max_lines) {
+    p := log_path(id)
+    if file_exists(p) == false {
+        return []
+    }
+    raw := read_file(p)
+    lines := split(raw, "\n")
+    n := len(lines)
+    start := 0
+    if n > max_lines {
+        start = n - max_lines
+    }
+    mut out := []
+    mut i := start
+    while i < n {
+        line := lines[i]
+        i = i + 1
+        if line == "" {
+            continue
+        }
+        out = push(out, line)
+    }
+    return out
+}

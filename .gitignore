@@ -1,0 +1,8 @@
+# Yard runtime state: tracked PIDs, restart counts, and captured logs.
+.yard/
+
+# A real local config (keep the example in examples/ committed instead).
+/yard.config.json
+
+# OS noise
+.DS_Store

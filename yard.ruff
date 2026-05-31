@@ -1,0 +1,15 @@
+# Yard entrypoint.
+#
+# Everything running locally is "in the yard." This thin wrapper hands the
+# user's arguments to the CLI module and turns its return code into a process
+# exit code. With no arguments it starts the local dashboard server.
+#
+# Run with:
+#   ruff run yard.ruff -- <command> [arguments]
+# or via the bin/yard wrapper:
+#   ./bin/yard [command] [arguments]
+
+from src.cli import main
+
+code := main(args())
+exit(code)

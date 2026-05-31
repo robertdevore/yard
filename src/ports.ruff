@@ -1,0 +1,176 @@
+# Yard :: ports
+#
+# The scanner. It shells out to `lsof` to list listening TCP sockets and parses
+# the output into structured DetectedProcess dicts. Everything here is defensive:
+# if `lsof` is missing, permission-limited, or prints something unexpected, we
+# degrade to "as much as we could learn" rather than crashing the dashboard.
+#
+# Only read-only inspection commands are ever run here (lsof, ps). Nothing in
+# this module signals, starts, or stops a process.
+
+from src.util import truthy, includes, split_ws, last_segment, drop_last_segment
+
+# Run the listener scan. Returns:
+#   { "ok": bool, "error": str|null, "processes": [DetectedProcess, ...] }
+# A DetectedProcess is:
+#   { pid, port, address, protocol, ip_version, process_name, command, user, raw }
+export func scan() {
+    cmd := "lsof -nP -iTCP -sTCP:LISTEN +c 0"
+    r := execute_status(cmd)
+    out := "${r.stdout}"
+    if trim(out) == "" {
+        if r.exitcode != 0 {
+            return {
+                "ok": false,
+                "error": "lsof unavailable or returned no output (exit ${r.exitcode}). On macOS/Linux install lsof, or run Yard with sufficient permissions.",
+                "processes": []
+            }
+        }
+        return {"ok": true, "error": null, "processes": []}
+    }
+    processes := parse_lsof(out)
+    return {"ok": true, "error": null, "processes": processes}
+}
+
+# Parse raw `lsof` stdout into DetectedProcess dicts, de-duplicated by port.
+# Exposed so tests can exercise the parser without invoking lsof.
+export func parse_lsof(text) {
+    mut processes := []
+    mut seen_ports := []
+    lines := split(text, "\n")
+    mut li := 0
+    ln := len(lines)
+    while li < ln {
+        line := trim(lines[li])
+        li = li + 1
+        if line == "" {
+            continue
+        }
+        tokens := split_ws(line)
+        if len(tokens) < 9 {
+            continue
+        }
+        if tokens[0] == "COMMAND" {
+            continue
+        }
+        parsed := parse_lsof_row(tokens, line)
+        if type(parsed) == "null" {
+            continue
+        }
+        port := parsed["port"]
+        if port_seen(seen_ports, port) {
+            continue
+        }
+        seen_ports = push(seen_ports, port)
+        processes = push(processes, parsed)
+    }
+    return processes
+}
+
+# Local membership check using uniquely-named locals to avoid the VM's
+# variable-aliasing quirk when helpers are called inside a hot loop that shares
+# `i`/`n` names with its callees.
+func port_seen(arr, value) {
+    mut pi := 0
+    pn := len(arr)
+    while pi < pn {
+        if arr[pi] == value {
+            return true
+        }
+        pi = pi + 1
+    }
+    return false
+}
+
+# Turn one tokenized lsof row into a DetectedProcess, or null if it does not
+# look like a usable LISTEN row. The NAME column (address:port) is the token
+# just before the trailing "(LISTEN)" marker.
+func parse_lsof_row(tokens, raw) {
+    n := len(tokens)
+    name_idx := n - 2
+    if substring(tokens[n - 1], 0, 1) != "(" {
+        # No "(LISTEN)" suffix; treat the last token as NAME.
+        name_idx = n - 1
+    }
+    name := tokens[name_idx]
+    port_str := last_segment(name, ":")
+    if port_str == "" || port_str == name {
+        return null
+    }
+    port := parse_int(port_str)
+    if type(port) != "int" {
+        return null
+    }
+    if port <= 0 {
+        return null
+    }
+    address := drop_last_segment(name, ":")
+    if address == "" {
+        address = "*"
+    }
+    ip_version := "IPv4"
+    if len(tokens) >= 5 {
+        ip_version = tokens[4]
+    }
+    process_name := tokens[0]
+    pid := parse_int(tokens[1])
+    user := tokens[2]
+    return {
+        "pid": pid,
+        "port": port,
+        "address": address,
+        "protocol": "TCP",
+        "ip_version": ip_version,
+        "process_name": process_name,
+        "command": null,
+        "user": user,
+        "raw": raw
+    }
+}
+
+# Best-effort full command line for a PID via `ps`. Returns null if the PID is
+# gone or ps is unavailable. Used to enrich display ("node server.js") and to
+# refine sensitive-service detection.
+export func full_command(pid) {
+    if type(pid) != "int" {
+        return null
+    }
+    r := execute_status("ps -o command= -p ${pid}")
+    if r.exitcode != 0 {
+        return null
+    }
+    cmd := trim("${r.stdout}")
+    if cmd == "" {
+        return null
+    }
+    return cmd
+}
+
+# True if a PID is currently alive (signal 0 probes without affecting it).
+export func pid_alive(pid) {
+    if type(pid) != "int" {
+        return false
+    }
+    r := execute_status("kill -0 ${pid}")
+    return r.exitcode == 0
+}
+
+# Find the listening PID(s) for a given port by re-scanning. Returns an array of
+# ints (usually 0 or 1). Used by the stop-port CLI command.
+export func pids_on_port(port) {
+    s := scan()
+    mut out := []
+    procs := s["processes"]
+    mut i := 0
+    n := len(procs)
+    while i < n {
+        p := procs[i]
+        if p["port"] == port {
+            if includes(out, p["pid"]) == false {
+                out = push(out, p["pid"])
+            }
+        }
+        i = i + 1
+    }
+    return out
+}

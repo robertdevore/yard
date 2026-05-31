@@ -1,0 +1,293 @@
+# Yard :: status
+#
+# Composition layer. It fuses the four inputs — detected listeners, the managed
+# config, Yard's start-state, and health probes — into the ServiceStatus list
+# the API and UI consume, plus a summary. This is where "managed vs unknown",
+# "sensitive", "which actions are safe", and "is anything squatting on a managed
+# port" are all decided. It performs read-only inspection only.
+
+from src.util import truthy, includes
+from src.ports import scan, full_command
+from src.config import service_for_port
+from src.knownports import known_label, is_sensitive, infer_kind
+from src.health import check, skipped
+from src.state import load_state, get_entry
+
+# Build the full ServiceStatus list. `do_health` gates the (slower) HTTP probes
+# so callers can ask for a fast structural view. Returns:
+#   { "ok": bool, "scan_error": str|null, "services": [ServiceStatus...] }
+export func build_services(config, do_health, health_timeout_secs) {
+    services_cfg := config["services"]
+    scan_result := scan()
+    detected := scan_result["processes"]
+    state := load_state()
+
+    mut statuses := []
+    mut seen_ports := []
+
+    mut i := 0
+    n := len(detected)
+    while i < n {
+        p := detected[i]
+        i = i + 1
+        port := p["port"]
+        seen_ports = push(seen_ports, port)
+        svc := service_for_port(services_cfg, port)
+        statuses = push(statuses, status_for_detected(p, svc, state, do_health, health_timeout_secs))
+    }
+
+    # Managed services configured but not currently listening anywhere.
+    mut j := 0
+    m := len(services_cfg)
+    while j < m {
+        svc := services_cfg[j]
+        j = j + 1
+        if includes(seen_ports, svc["port"]) == false {
+            statuses = push(statuses, status_for_stopped(svc))
+        }
+    }
+
+    return {"ok": scan_result["ok"], "scan_error": scan_result["error"], "services": statuses}
+}
+
+# Build a ServiceStatus for a port we actually saw listening.
+func status_for_detected(p, svc, state, do_health, health_timeout_secs) {
+    port := p["port"]
+    pid := p["pid"]
+    process_name := p["process_name"]
+    cmd := full_command(pid)
+    cmd_text := process_name
+    if type(cmd) != "null" {
+        cmd_text = cmd
+    }
+
+    managed := type(svc) == "dict"
+    cfg_sensitive := false
+    if managed {
+        cfg_sensitive = truthy(svc["sensitive"])
+    }
+    sensitive := cfg_sensitive || is_sensitive(port, cmd_text)
+
+    url := inferred_url(port, p["address"])
+    open_url := url
+    if managed && type(svc["open"]) != "null" {
+        open_url = svc["open"]
+    }
+
+    # Ownership: did Yard start the process now on this port?
+    entry := managed_entry(state, svc, managed)
+    owned := false
+    started_at := null
+    restart_count := 0
+    if type(entry) == "dict" {
+        if type(entry["pid"]) == "int" && entry["pid"] == pid {
+            owned = true
+        }
+        started_at = entry["started_at"]
+        if truthy(has_key(entry, "restart_count")) {
+            restart_count = entry["restart_count"]
+        }
+    }
+    conflict := managed && (owned == false)
+
+    health := health_for(svc, managed, sensitive, url, do_health, health_timeout_secs)
+
+    name := process_name
+    group := "Unknown"
+    has_start := false
+    sid := null
+    description := null
+    if managed {
+        name = svc["name"]
+        group = svc["group"]
+        has_start = type(svc["start"]) != "null" && "${svc["start"]}" != ""
+        sid = svc["id"]
+        description = svc["description"]
+    }
+
+    return {
+        "id": sid,
+        "name": name,
+        "group": group,
+        "port": port,
+        "url": url,
+        "open_url": open_url,
+        "managed": managed,
+        "sensitive": sensitive,
+        "conflict": conflict,
+        "owned_by_yard": owned,
+        "pid": pid,
+        "command": cmd_text,
+        "process_name": process_name,
+        "user": p["user"],
+        "address": p["address"],
+        "ip_version": p["ip_version"],
+        "known_label": known_label(port),
+        "kind": infer_kind(port, cmd_text),
+        "description": description,
+        "started_at": started_at,
+        "restart_count": restart_count,
+        "health_status": health["status"],
+        "http_status": health["http_status"],
+        "response_ms": health["response_ms"],
+        "state": "running",
+        "actions": actions_for(managed, has_start, true)
+    }
+}
+
+# Build a ServiceStatus for a managed service that is configured but not running.
+func status_for_stopped(svc) {
+    port := svc["port"]
+    sensitive := truthy(svc["sensitive"]) || is_sensitive(port, svc["start"])
+    has_start := type(svc["start"]) != "null" && "${svc["start"]}" != ""
+    url := inferred_url(port, "127.0.0.1")
+    open_url := url
+    if type(svc["open"]) != "null" {
+        open_url = svc["open"]
+    }
+    return {
+        "id": svc["id"],
+        "name": svc["name"],
+        "group": svc["group"],
+        "port": port,
+        "url": url,
+        "open_url": open_url,
+        "managed": true,
+        "sensitive": sensitive,
+        "conflict": false,
+        "owned_by_yard": false,
+        "pid": null,
+        "command": null,
+        "process_name": null,
+        "user": null,
+        "address": null,
+        "ip_version": null,
+        "known_label": known_label(port),
+        "kind": infer_kind(port, svc["start"]),
+        "description": svc["description"],
+        "started_at": null,
+        "restart_count": 0,
+        "health_status": "unknown",
+        "http_status": null,
+        "response_ms": null,
+        "state": "stopped",
+        "actions": actions_for(true, has_start, false)
+    }
+}
+
+func managed_entry(state, svc, managed) {
+    if managed == false {
+        return null
+    }
+    return get_entry(state, svc["id"])
+}
+
+# Choose a health probe strategy. Sensitive services are never probed over HTTP.
+func health_for(svc, managed, sensitive, url, do_health, health_timeout_secs) {
+    if do_health == false {
+        return skipped("unknown")
+    }
+    if sensitive {
+        return skipped("not_http")
+    }
+    target := url
+    if managed && type(svc["health"]) != "null" && "${svc["health"]}" != "" {
+        target = svc["health"]
+    }
+    return check(target, health_timeout_secs)
+}
+
+# Infer a browser URL for a port. Wildcard / loopback binds map to 127.0.0.1.
+func inferred_url(port, address) {
+    host := "127.0.0.1"
+    a := "${address}"
+    if a != "*" && a != "" && a != "127.0.0.1" && a != "[::1]" && a != "::1" && a != "0.0.0.0" {
+        host = a
+    }
+    return "http://${host}:${port}"
+}
+
+# Which actions the UI should offer. Stop/force-stop are always available on a
+# running process; restart/logs only for managed services with a start command;
+# start only for a managed service that is currently stopped.
+func actions_for(managed, has_start, running) {
+    can_restart := managed && has_start
+    is_unknown := managed == false
+    if running {
+        return {
+            "open": true,
+            "copy": true,
+            "start": false,
+            "stop": true,
+            "force_stop": true,
+            "restart": can_restart,
+            "logs": managed,
+            "inspect": true,
+            "claim": is_unknown
+        }
+    }
+    return {
+        "open": false,
+        "copy": true,
+        "start": can_restart,
+        "stop": false,
+        "force_stop": false,
+        "restart": false,
+        "logs": managed,
+        "inspect": true,
+        "claim": false
+    }
+}
+
+# Aggregate the summary cards from a ServiceStatus list.
+export func summarize(statuses) {
+    mut running := 0
+    mut managed_running := 0
+    mut unknown_running := 0
+    mut unhealthy := 0
+    mut sensitive := 0
+    mut conflicts := 0
+    mut managed_total := 0
+    mut stopped := 0
+
+    mut i := 0
+    n := len(statuses)
+    while i < n {
+        s := statuses[i]
+        i = i + 1
+        if s["managed"] {
+            managed_total = managed_total + 1
+        }
+        if s["state"] == "running" {
+            running = running + 1
+            if s["managed"] {
+                managed_running = managed_running + 1
+            } else {
+                unknown_running = unknown_running + 1
+            }
+            if s["sensitive"] {
+                sensitive = sensitive + 1
+            }
+            hs := s["health_status"]
+            if hs == "unhealthy" || hs == "timeout" {
+                unhealthy = unhealthy + 1
+            }
+            if s["conflict"] {
+                conflicts = conflicts + 1
+            }
+        } else {
+            stopped = stopped + 1
+        }
+    }
+
+    return {
+        "running_ports": running,
+        "managed_running": managed_running,
+        "managed_total": managed_total,
+        "unknown_ports": unknown_running,
+        "unhealthy": unhealthy,
+        "sensitive": sensitive,
+        "conflicts": conflicts,
+        "stopped_managed": stopped
+    }
+}

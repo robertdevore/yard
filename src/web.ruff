@@ -1,0 +1,263 @@
+# Yard :: web
+#
+# The single-page dashboard, served as one self-contained HTML document (no
+# build step, no external assets, no CDN). It is assembled from several string
+# fragments because the Ruff lexer caps individual string literals at 8 KB.
+#
+# Conventions to keep this valid Ruff source:
+#   * HTML attributes and JS strings use single quotes (no escaping needed).
+#   * JS template-literal interpolations are written \${...} so Ruff emits a
+#     literal ${...} rather than interpolating them itself.
+#   * The ONLY real Ruff interpolation is ${token}, injected into the page so
+#     the browser can authorize destructive actions.
+
+# Assemble the full HTML document, embedding the per-session action token.
+export func index_html(token) {
+    mut out := ""
+    out = out + page_head()
+    out = out + page_css()
+    out = out + page_body()
+    out = out + page_script(token)
+    return out
+}
+
+func page_head() {
+    return "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>" +
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>" +
+        "<title>Yard - localhost command center</title>"
+}
+
+func page_css() {
+    mut s := "<style>"
+    s = s + ":root{--bg:#0d1117;--panel:#161b22;--panel2:#1c232c;--line:#30363d;"
+    s = s + "--text:#e6edf3;--muted:#8b949e;--accent:#3b82f6;--green:#3fb950;--red:#f85149;"
+    s = s + "--amber:#d29922;--purple:#a371f7;--cyan:#39c5cf;}"
+    s = s + "*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);"
+    s = s + "font:14px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}"
+    s = s + "a{color:var(--accent);text-decoration:none}"
+    s = s + ".wrap{max-width:1200px;margin:0 auto;padding:24px}"
+    s = s + "header.top{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:20px}"
+    s = s + ".brand{display:flex;align-items:baseline;gap:10px}"
+    s = s + ".brand h1{font-size:22px;margin:0;letter-spacing:.5px}"
+    s = s + ".brand .sub{color:var(--muted);font-size:13px}"
+    s = s + ".spacer{flex:1}"
+    s = s + ".ctrl{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px}"
+    s = s + "button{font:inherit;cursor:pointer;background:var(--panel2);color:var(--text);"
+    s = s + "border:1px solid var(--line);border-radius:6px;padding:6px 12px}"
+    s = s + "button:hover{border-color:var(--accent)}button:disabled{opacity:.35;cursor:not-allowed}"
+    s = s + "button.primary{background:var(--accent);border-color:var(--accent);color:#fff}"
+    s = s + "button.danger{border-color:var(--red);color:var(--red)}"
+    s = s + "button.danger:hover{background:var(--red);color:#fff}"
+    s = s + "button.sm{padding:4px 9px;font-size:12px}"
+    s = s + "input,select{font:inherit;background:var(--panel2);color:var(--text);"
+    s = s + "border:1px solid var(--line);border-radius:6px;padding:6px 10px}"
+    s = s + ".cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px}"
+    s = s + ".card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}"
+    s = s + ".card .n{font-size:26px;font-weight:600}.card .l{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.5px}"
+    s = s + ".card.warn .n{color:var(--amber)}.card.bad .n{color:var(--red)}.card.good .n{color:var(--green)}"
+    s = s + ".toolbar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;align-items:center}"
+    s = s + ".toolbar input.search{flex:1;min-width:180px}"
+    s = s + ".banner{border-radius:8px;padding:10px 14px;margin-bottom:14px;font-size:13px}"
+    s = s + ".banner.err{background:rgba(248,81,73,.12);border:1px solid var(--red)}"
+    s = s + ".banner.warn{background:rgba(210,153,34,.12);border:1px solid var(--amber)}"
+    s = s + ".banner.good{background:rgba(63,185,80,.12);border:1px solid var(--green)}"
+    s = s + ".group h2{font-size:13px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);"
+    s = s + "margin:18px 0 10px;border-bottom:1px solid var(--line);padding-bottom:6px}"
+    return s + page_css2()
+}
+
+func page_css2() {
+    mut s := ".svc{background:var(--panel);border:1px solid var(--line);border-radius:10px;"
+    s = s + "padding:14px 16px;margin-bottom:10px;display:grid;grid-template-columns:1fr auto;gap:10px}"
+    s = s + ".svc.sensitive{border-left:3px solid var(--amber)}"
+    s = s + ".svc.unknown{border-left:3px solid var(--purple)}"
+    s = s + ".svc.stopped{opacity:.72}"
+    s = s + ".svc .head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}"
+    s = s + ".svc .name{font-weight:600;font-size:15px}"
+    s = s + ".svc .meta{color:var(--muted);font-size:12.5px;margin-top:6px;display:flex;gap:14px;flex-wrap:wrap}"
+    s = s + ".svc .meta b{color:var(--text);font-weight:500}"
+    s = s + ".svc .cmd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;"
+    s = s + "color:var(--muted);margin-top:6px;word-break:break-all}"
+    s = s + ".actions{display:flex;gap:6px;flex-wrap:wrap;align-items:flex-start;justify-content:flex-end}"
+    s = s + ".badge{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);white-space:nowrap}"
+    s = s + ".badge.managed{color:var(--cyan);border-color:var(--cyan)}"
+    s = s + ".badge.unknown{color:var(--purple);border-color:var(--purple)}"
+    s = s + ".badge.sensitive{color:var(--amber);border-color:var(--amber)}"
+    s = s + ".badge.conflict{color:var(--red);border-color:var(--red)}"
+    s = s + ".dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}"
+    s = s + ".h-healthy{color:var(--green)}.h-healthy .dot,.s-running .dot{background:var(--green)}"
+    s = s + ".h-unhealthy{color:var(--red)}.h-unhealthy .dot,.h-timeout .dot{background:var(--red)}"
+    s = s + ".h-timeout{color:var(--amber)}.h-not_http{color:var(--muted)}.h-not_http .dot{background:var(--muted)}"
+    s = s + ".h-unknown{color:var(--muted)}.h-unknown .dot{background:var(--muted)}"
+    s = s + ".s-stopped .dot{background:var(--muted)}"
+    s = s + ".empty{text-align:center;color:var(--muted);padding:60px 20px;border:1px dashed var(--line);border-radius:10px}"
+    s = s + ".modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:50}"
+    s = s + ".modal.open{display:flex}.modal .box{background:var(--panel);border:1px solid var(--line);"
+    s = s + "border-radius:12px;padding:20px;max-width:680px;width:90%;max-height:80vh;overflow:auto}"
+    s = s + ".modal h3{margin:0 0 12px}.modal pre{background:var(--bg);border:1px solid var(--line);"
+    s = s + "border-radius:8px;padding:12px;overflow:auto;font-size:12px;max-height:50vh}"
+    s = s + ".modal .row{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}"
+    s = s + ".foot{color:var(--muted);font-size:12px;text-align:center;margin-top:24px}"
+    return s + "</style></head>"
+}
+
+func page_body() {
+    mut s := "<body><div class='wrap'>"
+    s = s + "<header class='top'><div class='brand'><h1>Yard</h1>"
+    s = s + "<span class='sub'>localhost command center</span></div><div class='spacer'></div>"
+    s = s + "<label class='ctrl'><input type='checkbox' id='health' checked> health probes</label>"
+    s = s + "<label class='ctrl'><input type='checkbox' id='auto'> auto-refresh</label>"
+    s = s + "<button class='primary' id='refresh'>Refresh</button></header>"
+    s = s + "<div id='banners'></div>"
+    s = s + "<div class='banner warn' id='flash' style='display:none'></div>"
+    s = s + "<div class='cards' id='cards'></div>"
+    s = s + "<div class='toolbar'><input class='search' id='search' placeholder='Search name, port, command...'>"
+    s = s + "<select id='fgroup'><option value=''>All groups</option></select>"
+    s = s + "<select id='fstatus'><option value=''>All statuses</option>"
+    s = s + "<option value='running'>Running</option><option value='stopped'>Stopped</option>"
+    s = s + "<option value='managed'>Managed</option><option value='unknown'>Unknown</option>"
+    s = s + "<option value='sensitive'>Sensitive</option><option value='unhealthy'>Unhealthy</option></select>"
+    s = s + "<select id='sort'><option value='port'>Sort: port</option>"
+    s = s + "<option value='name'>Sort: name</option><option value='status'>Sort: status</option>"
+    s = s + "<option value='group'>Sort: group</option></select></div>"
+    s = s + "<div id='list'></div>"
+    s = s + "<div class='foot'>Yard binds only to 127.0.0.1. Managed commands come solely from your config file.</div>"
+    s = s + "</div>"
+    s = s + "<div class='modal' id='modal'><div class='box' id='modalbox'></div></div>"
+    s = s + "</body>"
+    return s
+}
+
+func page_script(token) {
+    mut s := "<script>"
+    s = s + "const YARD_TOKEN='${token}';"
+    s = s + page_js_core()
+    s = s + page_js_render()
+    s = s + page_js_actions()
+    s = s + "boot();</script></html>"
+    return s
+}
+
+func page_js_core() {
+    mut s := "let DATA={services:[],summary:{},config:{},scan_error:null,ok:true};"
+    s = s + "let timer=null;const Q=String.fromCharCode(34);"
+    s = s + "const $=function(id){return document.getElementById(id);};"
+    s = s + "function esc(v){return String(v==null?'':v).split('&').join('&amp;').split('<').join('&lt;').split('>').join('&gt;').split(Q).join('&quot;');}"
+    s = s + "async function getJSON(u){const r=await fetch(u);return await r.json();}"
+    s = s + "async function postJSON(u,b){const body=Object.assign({token:YARD_TOKEN},b||{});"
+    s = s + "const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return await r.json();}"
+    s = s + "function flash(msg,kind){const b=$('flash');if(!b)return;b.className='banner '+(kind||'warn');b.textContent=msg;b.style.display='block';"
+    s = s + "clearTimeout(flash._t);flash._t=setTimeout(function(){b.style.display='none';},4000);}"
+    s = s + "async function loadData(){const wh=$('health').checked?'1':'0';try{DATA=await getJSON('/api/services?health='+wh);render();}"
+    s = s + "catch(e){$('list').innerHTML=`<div class='banner err'>Could not reach the Yard API. Is the server still running?</div>`;}}"
+    s = s + "function boot(){$('refresh').addEventListener('click',loadData);"
+    s = s + "$('health').addEventListener('change',loadData);"
+    s = s + "$('auto').addEventListener('change',function(){if(this.checked){timer=setInterval(loadData,5000);}else{clearInterval(timer);}});"
+    s = s + "['search','fgroup','fstatus','sort'].forEach(function(id){$(id).addEventListener('input',render);});"
+    s = s + "$('list').addEventListener('click',onListClick);"
+    s = s + "$('modal').addEventListener('click',function(e){if(e.target.id==='modal')closeModal();});"
+    s = s + "loadData();}"
+    return s
+}
+
+func page_js_render() {
+    mut s := "function render(){DATA.services.forEach(function(s,i){s._i=i;});"
+    s = s + "$('banners').innerHTML=bannersHtml();$('cards').innerHTML=cardsHtml();syncGroups();"
+    s = s + "$('list').innerHTML=listHtml(filtered());}"
+    s = s + "function bannersHtml(){let h='';const c=DATA.config||{};"
+    s = s + "if(DATA.scan_error){h+=`<div class='banner err'>Scanner: \${esc(DATA.scan_error)}</div>`;}"
+    s = s + "(c.errors||[]).forEach(function(e){h+=`<div class='banner err'>Config error: \${esc(e)}</div>`;});"
+    s = s + "(c.warnings||[]).forEach(function(w){h+=`<div class='banner warn'>Config: \${esc(w)}</div>`;});"
+    s = s + "if(c.exists===false){h+=`<div class='banner warn'>No config at \${esc(c.path)} - showing detected ports only. Add managed services to start/restart from here.</div>`;}"
+    s = s + "return h;}"
+    s = s + "function cardsHtml(){const m=DATA.summary||{};"
+    s = s + "function card(n,l,cls){return `<div class='card \${cls||''}'><div class='n'>\${n==null?0:n}</div><div class='l'>\${l}</div></div>`;}"
+    s = s + "return card(m.running_ports,'Running')+card((m.managed_running||0)+' / '+(m.managed_total||0),'Managed')"
+    s = s + "+card(m.unknown_ports,'Unknown',m.unknown_ports?'warn':'')+card(m.unhealthy,'Unhealthy',m.unhealthy?'bad':'')"
+    s = s + "+card(m.sensitive,'Sensitive',m.sensitive?'warn':'')+card(m.conflicts,'Conflicts',m.conflicts?'bad':'')"
+    s = s + "+card(m.stopped_managed,'Stopped');}"
+    s = s + "function syncGroups(){const sel=$('fgroup');const cur=sel.value;const gs=[];"
+    s = s + "DATA.services.forEach(function(s){if(gs.indexOf(s.group)<0)gs.push(s.group);});gs.sort();"
+    s = s + "let h=`<option value=''>All groups</option>`;gs.forEach(function(g){h+=`<option value='\${esc(g)}'>\${esc(g)}</option>`;});"
+    s = s + "sel.innerHTML=h;sel.value=cur;}"
+    s = s + "function filtered(){const q=$('search').value.toLowerCase();const g=$('fgroup').value;const st=$('fstatus').value;"
+    s = s + "let arr=DATA.services.filter(function(s){if(g&&s.group!==g)return false;"
+    s = s + "if(st==='running'&&s.state!=='running')return false;if(st==='stopped'&&s.state!=='stopped')return false;"
+    s = s + "if(st==='managed'&&!s.managed)return false;if(st==='unknown'&&s.managed)return false;"
+    s = s + "if(st==='sensitive'&&!s.sensitive)return false;"
+    s = s + "if(st==='unhealthy'&&!(s.health_status==='unhealthy'||s.health_status==='timeout'))return false;"
+    s = s + "if(q){const hay=((s.name||'')+' '+s.port+' '+(s.command||'')+' '+(s.group||'')+' '+(s.id||'')).toLowerCase();if(hay.indexOf(q)<0)return false;}return true;});"
+    s = s + "const so=$('sort').value;arr.sort(function(a,b){if(so==='name')return (''+a.name).localeCompare(''+b.name);"
+    s = s + "if(so==='group')return (''+a.group).localeCompare(''+b.group)||a.port-b.port;"
+    s = s + "if(so==='status')return rank(a)-rank(b)||a.port-b.port;return a.port-b.port;});return arr;}"
+    s = s + "function rank(s){if(s.conflict)return 0;if(s.health_status==='unhealthy'||s.health_status==='timeout')return 1;"
+    s = s + "if(s.state==='running')return 2;return 3;}"
+    return s + page_js_render2()
+}
+
+func page_js_render2() {
+    mut s := "function healthText(s){if(s.state==='stopped')return 'Not running';let t=s.health_status;let x='';"
+    s = s + "if(s.http_status)x+=' '+s.http_status;if(s.response_ms!=null)x+=' '+s.response_ms+'ms';return t+x;}"
+    s = s + "function listHtml(arr){if(!arr.length)return `<div class='empty'>No localhost services match. Add managed services to your Yard config or start a dev server.</div>`;"
+    s = s + "let groups={};arr.forEach(function(s){(groups[s.group]=groups[s.group]||[]).push(s);});"
+    s = s + "let h='';Object.keys(groups).sort().forEach(function(g){h+=`<div class='group'><h2>\${esc(g)}</h2>`;"
+    s = s + "groups[g].forEach(function(s){h+=svcCard(s);});h+='</div>';});return h;}"
+    s = s + "function svcCard(s){let cls='svc';if(!s.managed)cls+=' unknown';if(s.sensitive)cls+=' sensitive';if(s.state==='stopped')cls+=' stopped';"
+    s = s + "const sc=s.state==='running'?'s-running':'s-stopped';const hc='h-'+s.health_status;"
+    s = s + "let badges=s.managed?`<span class='badge managed'>managed</span>`:`<span class='badge unknown'>unknown</span>`;"
+    s = s + "if(s.sensitive)badges+=`<span class='badge sensitive'>sensitive</span>`;"
+    s = s + "if(s.conflict)badges+=`<span class='badge conflict'>port conflict</span>`;"
+    s = s + "const lbl=s.known_label?` &middot; \${esc(s.known_label)}`:'';"
+    s = s + "let meta=`<span class='\${sc}'><span class='dot'></span>\${s.state==='running'?'Running':'Stopped'}</span>`;"
+    s = s + "meta+=`<span>Port <b>\${s.port}</b>\${lbl}</span>`;"
+    s = s + "meta+=`<span class='\${hc}'><span class='dot'></span>\${esc(healthText(s))}</span>`;"
+    s = s + "if(s.pid)meta+=`<span>PID <b>\${s.pid}</b></span>`;"
+    s = s + "if(s.restart_count)meta+=`<span>restarts <b>\${s.restart_count}</b></span>`;"
+    s = s + "meta+=`<span><a href='\${esc(s.url)}' target='_blank' rel='noopener'>\${esc(s.url)}</a></span>`;"
+    s = s + "const cmd=s.command?`<div class='cmd'>\${esc(s.command)}</div>`:'';"
+    s = s + "return `<div class='\${cls}'><div><div class='head'><span class='name'>\${esc(s.name)}</span>\${badges}</div>`"
+    s = s + "+`<div class='meta'>\${meta}</div>\${cmd}</div><div class='actions'>\${actionBtns(s)}</div></div>`;}"
+    s = s + "function btn(label,act,i,cls){return `<button class='sm \${cls||''}' data-act='\${act}' data-idx='\${i}'>\${label}</button>`;}"
+    s = s + "function actionBtns(s){const a=s.actions||{};const i=s._i;let h='';"
+    s = s + "if(a.open)h+=btn('Open','open',i);if(a.copy)h+=btn('Copy','copy',i);"
+    s = s + "if(a.start)h+=btn('Start','start',i,'primary');if(a.restart)h+=btn('Restart','restart',i);"
+    s = s + "if(a.logs)h+=btn('Logs','logs',i);if(a.inspect)h+=btn('Inspect','inspect',i);"
+    s = s + "if(a.stop)h+=btn('Stop','stop',i,'danger');if(a.force_stop)h+=btn('Force','force',i,'danger');"
+    s = s + "if(a.claim)h+=btn('Claim','claim',i);return h;}"
+    return s
+}
+
+func page_js_actions() {
+    mut s := "function onListClick(e){const b=e.target.closest('button[data-act]');if(!b)return;"
+    s = s + "const s=DATA.services[+b.dataset.idx];if(!s)return;handleAction(b.dataset.act,s);}"
+    s = s + "function handleAction(act,s){"
+    s = s + "if(act==='open'){window.open(s.open_url,'_blank');return;}"
+    s = s + "if(act==='copy'){navigator.clipboard.writeText(s.url).then(function(){flash('Copied '+s.url,'good');});return;}"
+    s = s + "if(act==='inspect'){modalInspect(s);return;}"
+    s = s + "if(act==='logs'){modalLogs(s);return;}"
+    s = s + "if(act==='claim'){modalClaim(s);return;}"
+    s = s + "if(act==='start'){doAction('/api/services/'+s.id+'/start',{},'start '+s.name);return;}"
+    s = s + "if(act==='restart'){if(s.sensitive){confirmThen('Restart sensitive service '+s.name+'?','Restart',function(){doAction('/api/services/'+s.id+'/restart',{confirm:true},'restart '+s.name);});}"
+    s = s + "else{doAction('/api/services/'+s.id+'/restart',{},'restart '+s.name);}return;}"
+    s = s + "if(act==='stop'||act==='force'){const force=act==='force';"
+    s = s + "const url=s.id?('/api/services/'+s.id+'/stop'):('/api/processes/'+s.pid+'/stop');"
+    s = s + "const need=force||s.sensitive;const label=(force?'Force stop ':'Stop ')+s.name+(s.sensitive?' (sensitive)':'');"
+    s = s + "if(need){confirmThen(label+'?',force?'Force stop':'Stop',function(){doAction(url,{force:force,confirm:true},label);});}"
+    s = s + "else{doAction(url,{force:false},label);}return;}}"
+    s = s + "async function doAction(url,body,label){try{let res=await postJSON(url,body);"
+    s = s + "if(res&&res.needs_confirm){confirmThen((res.error||'Confirm action')+'?','Confirm',function(){doAction(url,Object.assign({confirm:true},body),label);});return;}"
+    s = s + "if(res&&res.ok){flash('OK: '+label,'good');}else{flash('Failed: '+label+' - '+((res&&res.error)||'unknown error'),'err');}}"
+    s = s + "catch(e){flash('Error: '+label,'err');}setTimeout(loadData,400);}"
+    s = s + "function openModal(html){$('modalbox').innerHTML=html;$('modal').classList.add('open');}"
+    s = s + "function closeModal(){$('modal').classList.remove('open');}"
+    s = s + "function bindClose(){const b=$('mclose');if(b)b.addEventListener('click',closeModal);}"
+    s = s + "function confirmThen(msg,okLabel,fn){openModal(`<h3>Confirm</h3><p>\${esc(msg)}</p><div class='row'><button id='mcancel'>Cancel</button><button id='mok' class='danger'>\${esc(okLabel)}</button></div>`);"
+    s = s + "$('mcancel').addEventListener('click',closeModal);$('mok').addEventListener('click',function(){closeModal();fn();});}"
+    s = s + "function modalInspect(s){openModal(`<h3>\${esc(s.name)}</h3><pre>\${esc(JSON.stringify(s,null,2))}</pre><div class='row'><button id='mclose'>Close</button></div>`);bindClose();}"
+    s = s + "async function modalLogs(s){openModal(`<h3>Logs - \${esc(s.name)}</h3><pre id='logpre'>Loading...</pre><div class='row'><button id='mclose'>Close</button></div>`);bindClose();"
+    s = s + "try{const d=await getJSON('/api/services/'+s.id+'/logs');const t=(d.lines&&d.lines.length)?d.lines.join('\\n'):'(no logs captured yet)';$('logpre').textContent=t;}"
+    s = s + "catch(e){$('logpre').textContent='Failed to load logs';}}"
+    s = s + "function modalClaim(s){const entry={id:'service-'+s.port,name:'Service on '+s.port,group:'Claimed',port:s.port,cwd:'~/path/to/project',start:'<your start command>',health:s.url,open:s.url};"
+    s = s + "openModal(`<h3>Claim port \${s.port}</h3><p>Add this to your Yard config services array, then edit cwd and start:</p><pre>\${esc(JSON.stringify(entry,null,2))}</pre><div class='row'><button id='mclose'>Close</button></div>`);bindClose();}"
+    return s
+}

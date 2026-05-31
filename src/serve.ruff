@@ -1,0 +1,206 @@
+# Yard :: serve
+#
+# Wires the HTTP routes to the API logic and starts the server. Two safety
+# properties are enforced here at the transport layer:
+#   1. The server binds ONLY to 127.0.0.1 (loopback). It is never reachable
+#      from other machines on the network.
+#   2. Every destructive (POST) endpoint requires a per-session action token,
+#      sent in the JSON body. The token is embedded in the dashboard page, so
+#      same-origin scripts can act, but a cross-origin page cannot forge a
+#      request (it can neither read the token nor guess it).
+#
+# The action token lives in a module-level global so the inline route handlers
+# (which execute with shared globals) can read it.
+
+from src.web import index_html
+from src.api import services_payload, summary_payload, ports_payload
+from src.api import start_action, stop_action, restart_action, stop_process_action, logs_payload
+from src.util import truthy
+from src.state import ensure_dirs
+
+HOST := "127.0.0.1"
+HEALTH_TIMEOUT := "1"
+LOG_LINES := 300
+
+# Action token for this server session. Set by serve() before listening.
+mut YARD_TOKEN := ""
+
+# Start the dashboard on the loopback interface at `port`. Blocks until killed.
+export func serve(port) {
+    ensure_dirs()
+    YARD_TOKEN = gen_token()
+
+    print("")
+    print("  Yard - localhost command center")
+    print("  ------------------------------------------------")
+    print("  Dashboard:  http://${HOST}:${port}")
+    print("  Binding:    ${HOST} only (loopback)")
+    print("  Config:     ${config_hint()}")
+    print("  State/logs: ${env_or("YARD_DIR", ".yard")}")
+    print("  Action token issued for this session.")
+    print("  Press Ctrl+C to stop.")
+    print("")
+
+    srv := build_server(port)
+    srv.listen()
+    return 0
+}
+
+func config_hint() {
+    return env_or("YARD_CONFIG", "yard.config.json")
+}
+
+# Generate a hard-to-guess session token. Prefers uuidgen; falls back to a
+# time-seeded value if uuidgen is unavailable.
+func gen_token() {
+    r := execute_status("uuidgen")
+    t := trim("${r.stdout}")
+    if t != "" {
+        return t
+    }
+    return "yard-${now()}-${rand_int(1000000)}"
+}
+
+func rand_int(n) {
+    r := execute_status("echo $RANDOM")
+    v := parse_int(trim("${r.stdout}"))
+    if type(v) == "int" {
+        return v
+    }
+    return 0
+}
+
+# Construct the routed server. Each handler is a thin closure delegating to a
+# top-level helper so the request logic stays testable and readable.
+func build_server(port) {
+    srv := http_listen(HOST, port)
+    srv := srv.route("GET", "/", func(req) { return h_index(req) })
+    srv := srv.route("GET", "/api/summary", func(req) { return h_summary(req) })
+    srv := srv.route("GET", "/api/services", func(req) { return h_services(req) })
+    srv := srv.route("GET", "/api/ports", func(req) { return h_ports(req) })
+    srv := srv.route("GET", "/api/services/:id/logs", func(req) { return h_logs(req) })
+    srv := srv.route("POST", "/api/services/:id/start", func(req) { return h_start(req) })
+    srv := srv.route("POST", "/api/services/:id/stop", func(req) { return h_stop(req) })
+    srv := srv.route("POST", "/api/services/:id/restart", func(req) { return h_restart(req) })
+    srv := srv.route("POST", "/api/processes/:pid/stop", func(req) { return h_proc_stop(req) })
+    srv := srv.route("POST", "/api/processes/:pid/force-stop", func(req) { return h_proc_force(req) })
+    return srv
+}
+
+# ---------------------------------------------------------------------------
+# Handlers
+# ---------------------------------------------------------------------------
+
+func h_index(req) {
+    html := index_html(YARD_TOKEN)
+    resp := http_response(200, html)
+    resp := set_header(resp, "Content-Type", "text/html; charset=utf-8")
+    resp := set_header(resp, "Cache-Control", "no-store")
+    return resp
+}
+
+func h_summary(req) {
+    return json_response(200, summary_payload(want_health(req), HEALTH_TIMEOUT))
+}
+
+func h_services(req) {
+    return json_response(200, services_payload(want_health(req), HEALTH_TIMEOUT))
+}
+
+func h_ports(req) {
+    return json_response(200, ports_payload())
+}
+
+func h_logs(req) {
+    id := req["params"]["id"]
+    return json_response(200, logs_payload(id, LOG_LINES))
+}
+
+func h_start(req) {
+    body := parse_body(req)
+    if token_ok(body) == false {
+        return deny()
+    }
+    return json_response(200, start_action(req["params"]["id"]))
+}
+
+func h_stop(req) {
+    body := parse_body(req)
+    if token_ok(body) == false {
+        return deny()
+    }
+    return json_response(200, stop_action(req["params"]["id"], bflag(body, "force"), bflag(body, "confirm")))
+}
+
+func h_restart(req) {
+    body := parse_body(req)
+    if token_ok(body) == false {
+        return deny()
+    }
+    return json_response(200, restart_action(req["params"]["id"], bflag(body, "confirm")))
+}
+
+func h_proc_stop(req) {
+    body := parse_body(req)
+    if token_ok(body) == false {
+        return deny()
+    }
+    pid := parse_int(req["params"]["pid"])
+    return json_response(200, stop_process_action(pid, bflag(body, "force"), bflag(body, "confirm")))
+}
+
+func h_proc_force(req) {
+    body := parse_body(req)
+    if token_ok(body) == false {
+        return deny()
+    }
+    pid := parse_int(req["params"]["pid"])
+    return json_response(200, stop_process_action(pid, true, bflag(body, "confirm")))
+}
+
+# ---------------------------------------------------------------------------
+# Request helpers
+# ---------------------------------------------------------------------------
+
+func want_health(req) {
+    q := req["query"]
+    if has_key(q, "health") == 1 {
+        return q["health"] != "0"
+    }
+    return true
+}
+
+func parse_body(req) {
+    b := "${req["body"]}"
+    if trim(b) == "" {
+        return {}
+    }
+    mut p := null
+    try {
+        p = parse_json(b)
+    } except e {
+        return {}
+    }
+    if type(p) != "dict" {
+        return {}
+    }
+    return p
+}
+
+func token_ok(body) {
+    if has_key(body, "token") == 1 {
+        return body["token"] == YARD_TOKEN
+    }
+    return false
+}
+
+func bflag(body, key) {
+    if has_key(body, key) == 1 {
+        return truthy(body[key])
+    }
+    return false
+}
+
+func deny() {
+    return json_response(403, {"ok": false, "error": "invalid or missing action token"})
+}

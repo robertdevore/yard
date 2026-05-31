@@ -1,0 +1,227 @@
+# Yard :: api
+#
+# The JSON brains behind the HTTP routes. Every function here is pure-ish: it
+# reads fresh state (config, scan, health) and returns a plain dict that the
+# serve layer hands to json_response. Keeping the HTTP wiring out of this module
+# means the same logic is exercised directly by the test harness.
+#
+# Safety enforced here:
+#   * destructive actions require the action token (checked in serve)
+#   * force-stop always requires explicit confirmation
+#   * stopping a sensitive service requires explicit confirmation
+#   * restart only works for managed services with a start command
+#   * unknown processes can be stopped, never restarted/started
+
+from src.util import truthy, iso_now
+from src.config import load, resolve_path, service_by_id
+from src.ports import scan, pids_on_port, full_command, pid_alive
+from src.knownports import is_sensitive
+from src.process import start_service, stop_service, restart_service, stop_pid
+from src.state import read_logs
+from src.status import build_services, summarize
+
+# Load the active config from the conventional location each call so edits to
+# the config file are picked up without restarting the dashboard.
+export func load_cfg() {
+    return load(resolve_path(null))
+}
+
+func config_meta(config) {
+    return {
+        "path": config["path"],
+        "exists": config["exists"],
+        "errors": config["errors"],
+        "warnings": config["warnings"]
+    }
+}
+
+# GET /api/services — full service list + summary.
+export func services_payload(do_health, timeout_secs) {
+    config := load_cfg()
+    built := build_services(config, do_health, timeout_secs)
+    summary := summarize(built["services"])
+    return {
+        "ok": built["ok"],
+        "generated_at": iso_now(),
+        "scan_error": built["scan_error"],
+        "summary": summary,
+        "services": built["services"],
+        "config": config_meta(config)
+    }
+}
+
+# GET /api/summary — just the summary cards + config health.
+export func summary_payload(do_health, timeout_secs) {
+    config := load_cfg()
+    built := build_services(config, do_health, timeout_secs)
+    return {
+        "ok": built["ok"],
+        "generated_at": iso_now(),
+        "scan_error": built["scan_error"],
+        "summary": summarize(built["services"]),
+        "config": config_meta(config)
+    }
+}
+
+# GET /api/ports — raw detected listeners, no health/config fusion.
+export func ports_payload() {
+    s := scan()
+    return {
+        "ok": s["ok"],
+        "generated_at": iso_now(),
+        "error": s["error"],
+        "ports": s["processes"]
+    }
+}
+
+# POST /api/services/:id/start
+export func start_action(id) {
+    svc := require_service(id)
+    if type(svc) == "string" {
+        return err(svc)
+    }
+    res := start_service(svc)
+    return action_result(res, "start", id)
+}
+
+# POST /api/services/:id/stop  (body: {force, confirm})
+export func stop_action(id, force, confirm) {
+    svc := require_service(id)
+    if type(svc) == "string" {
+        return err(svc)
+    }
+    sensitive := truthy(svc["sensitive"]) || is_sensitive(svc["port"], svc["start"])
+    guard := confirm_guard(sensitive, force, confirm)
+    if type(guard) == "string" {
+        return needs_confirm(guard)
+    }
+    live_pid := first_pid(pids_on_port(svc["port"]))
+    res := stop_service(svc, live_pid, force)
+    return action_result(res, "stop", id)
+}
+
+# POST /api/services/:id/restart  (body: {confirm})
+export func restart_action(id, confirm) {
+    svc := require_service(id)
+    if type(svc) == "string" {
+        return err(svc)
+    }
+    if type(svc["start"]) == "null" || "${svc["start"]}" == "" {
+        return err("service '${id}' has no 'start' command; cannot restart")
+    }
+    sensitive := truthy(svc["sensitive"]) || is_sensitive(svc["port"], svc["start"])
+    if sensitive && truthy(confirm) == false {
+        return needs_confirm("restarting sensitive service '${id}' requires confirmation")
+    }
+    live_pid := first_pid(pids_on_port(svc["port"]))
+    res := restart_service(svc, live_pid)
+    return action_result(res, "restart", id)
+}
+
+# POST /api/processes/:pid/stop  (body: {force, confirm}) — for unknown procs.
+export func stop_process_action(pid, force, confirm) {
+    if type(pid) != "int" || pid <= 0 {
+        return err("invalid pid")
+    }
+    sensitive := process_is_sensitive(pid)
+    guard := confirm_guard(sensitive, force, confirm)
+    if type(guard) == "string" {
+        return needs_confirm(guard)
+    }
+    res := stop_pid(pid, force)
+    return action_result(res, "stop-process", "${pid}")
+}
+
+# GET /api/services/:id/logs
+export func logs_payload(id, max_lines) {
+    svc := require_service(id)
+    if type(svc) == "string" {
+        return err(svc)
+    }
+    return {
+        "ok": true,
+        "id": id,
+        "lines": read_logs(id, max_lines)
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+# Resolve a managed service by id, or return an error string if not found.
+func require_service(id) {
+    config := load_cfg()
+    svc := service_by_id(config["services"], id)
+    if type(svc) != "dict" {
+        return "no such managed service: '${id}'"
+    }
+    return svc
+}
+
+# Decide whether an action is allowed without further confirmation. Returns a
+# string reason when confirmation is REQUIRED, or true when clear to proceed.
+func confirm_guard(sensitive, force, confirm) {
+    if truthy(force) && truthy(confirm) == false {
+        return "force stop requires explicit confirmation"
+    }
+    if sensitive && truthy(confirm) == false {
+        return "stopping a sensitive service requires explicit confirmation"
+    }
+    return true
+}
+
+func process_is_sensitive(pid) {
+    s := scan()
+    procs := s["processes"]
+    mut i := 0
+    n := len(procs)
+    while i < n {
+        p := procs[i]
+        i = i + 1
+        if p["pid"] == pid {
+            cmd := full_command(pid)
+            cmd_text := p["process_name"]
+            if type(cmd) != "null" {
+                cmd_text = cmd
+            }
+            return is_sensitive(p["port"], cmd_text)
+        }
+    }
+    return false
+}
+
+func first_pid(pids) {
+    if len(pids) >= 1 {
+        return pids[0]
+    }
+    return null
+}
+
+func action_result(res, action, target) {
+    ok := truthy(res["ok"])
+    out := {
+        "ok": ok,
+        "action": action,
+        "target": target,
+        "error": res["error"]
+    }
+    if truthy(has_key(res, "pid")) {
+        out["pid"] := res["pid"]
+    }
+    if truthy(has_key(res, "signal")) {
+        out["signal"] := res["signal"]
+    }
+    if truthy(has_key(res, "note")) {
+        out["note"] := res["note"]
+    }
+    return out
+}
+
+func err(message) {
+    return {"ok": false, "error": message}
+}
+
+func needs_confirm(message) {
+    return {"ok": false, "needs_confirm": true, "error": message}
+}

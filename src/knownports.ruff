@@ -1,0 +1,121 @@
+# Yard :: knownports
+#
+# A small, opinionated map of well-known local development ports plus the rules
+# for deciding whether a service looks "sensitive" (a database, a model server,
+# a container daemon) and therefore deserves extra confirmation before we touch
+# it. This is purely advisory metadata: it never changes what a process is, only
+# how Yard labels and guards it.
+
+from src.util import truthy, contains_any_ci
+
+# Human-friendly hint for a recognized port. Keyed by the port as a string so
+# it composes with has_key. Returns null for unrecognized ports.
+func port_map() {
+    return {
+        "80": "HTTP",
+        "443": "HTTPS",
+        "3000": "Node / React / Next.js",
+        "3001": "Node (alt) / React",
+        "3306": "MySQL",
+        "4000": "Phoenix / generic dev",
+        "4173": "Vite preview",
+        "5000": "Flask / macOS AirPlay",
+        "5173": "Vite",
+        "5174": "Vite (alt)",
+        "5432": "Postgres",
+        "5433": "Postgres (alt)",
+        "6379": "Redis",
+        "7000": "macOS Control Center / dev",
+        "7474": "Neo4j browser",
+        "8000": "Python / Django / generic API",
+        "8080": "Generic web server",
+        "8081": "Generic web server (alt)",
+        "8443": "HTTPS (alt)",
+        "8888": "Jupyter / generic",
+        "9000": "PHP-FPM / generic",
+        "9090": "Prometheus",
+        "9200": "Elasticsearch",
+        "9222": "Chrome remote debugging",
+        "9753": "Yard dashboard",
+        "11434": "Ollama",
+        "1234": "LM Studio",
+        "27017": "MongoDB",
+        "2375": "Docker daemon (plain)",
+        "2376": "Docker daemon (TLS)",
+        "5672": "RabbitMQ",
+        "15672": "RabbitMQ management",
+        "8200": "Vault",
+        "3478": "STUN/TURN"
+    }
+}
+
+# Label for a recognized port, or null if we have no hint.
+export func known_label(port) {
+    key := "${port}"
+    m := port_map()
+    if truthy(has_key(m, key)) {
+        return m[key]
+    }
+    return null
+}
+
+# True if `port` is one we recognize at all.
+export func is_known_port(port) {
+    return type(known_label(port)) != "null"
+}
+
+# Ports that belong to databases, model servers, or container daemons. Stopping
+# one of these can lose data or break many dependent services, so Yard flags
+# them as sensitive and requires an extra confirmation.
+func sensitive_ports() {
+    return [3306, 5432, 5433, 6379, 27017, 2375, 2376, 5672, 9200, 7474, 8200, 11434, 1234]
+}
+
+# Process-name / command fragments that signal a sensitive service even on a
+# non-standard port (e.g. a Postgres started on 6000).
+func sensitive_command_fragments() {
+    return ["postgres", "postmaster", "mysqld", "mariadb", "redis-server", "redis",
+            "mongod", "dockerd", "com.docker", "ollama", "elasticsearch", "rabbitmq",
+            "beam.smp", "neo4j", "vault", "lm-studio", "lmstudio"]
+}
+
+# Decide whether a detected service should be treated as sensitive, given its
+# port and best-known command/process text. `cmd` may be null.
+export func is_sensitive(port, cmd) {
+    mut sp_i := 0
+    sp := sensitive_ports()
+    sp_n := len(sp)
+    while sp_i < sp_n {
+        if sp[sp_i] == port {
+            return true
+        }
+        sp_i = sp_i + 1
+    }
+    if type(cmd) != "null" {
+        if contains_any_ci(cmd, sensitive_command_fragments()) {
+            return true
+        }
+    }
+    return false
+}
+
+# A short category for grouping unknown processes by what they probably are.
+# Used only for display hints on unmanaged ports.
+export func infer_kind(port, cmd) {
+    if is_sensitive(port, cmd) {
+        return "datastore"
+    }
+    if contains_any_ci(cmd, ["node", "vite", "next", "npm", "pnpm", "yarn", "bun"]) {
+        return "node"
+    }
+    if contains_any_ci(cmd, ["python", "uvicorn", "gunicorn", "flask", "django"]) {
+        return "python"
+    }
+    if contains_any_ci(cmd, ["cargo", "target/debug", "target/release"]) {
+        return "rust"
+    }
+    if contains_any_ci(cmd, ["docker", "containerd"]) {
+        return "container"
+    }
+    return "other"
+}

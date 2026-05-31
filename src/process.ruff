@@ -1,0 +1,170 @@
+# Yard :: process
+#
+# The only module that signals, starts, or stops processes. Every control
+# action is narrow and explicit:
+#   * Starts run ONLY a service's configured `start` command, in its configured
+#     directory. There is no path from the API/UI to an arbitrary command.
+#   * Stops default to graceful SIGTERM; SIGKILL is a separate, explicit call.
+#   * Restart is start+stop bound to a managed service.
+# Commands are single-quoted with POSIX-safe escaping. Shell metacharacters in a
+# config value therefore cannot break out of the intended command.
+
+from src.util import truthy
+from src.ports import pid_alive
+from src.state import load_state, save_state, get_entry, new_entry, log_path, ensure_dirs
+
+# POSIX-escape a value for safe single-quoted inclusion in a shell command.
+func shq(value) {
+    s := "${value}"
+    escaped := replace_str(s, "'", "'\\''")
+    return "'" + escaped + "'"
+}
+
+# Start a managed service. `svc` is a validated ServiceConfig. Returns:
+#   { "ok": bool, "error": str|null, "pid": int|null, "log_file": str }
+# Refuses to start a service that already has a live Yard-tracked PID.
+export func start_service(svc) {
+    id := svc["id"]
+    start_cmd := svc["start"]
+    if type(start_cmd) == "null" || "${start_cmd}" == "" {
+        return fail("service '${id}' has no 'start' command configured")
+    }
+
+    state := load_state()
+    existing := get_entry(state, id)
+    if type(existing) == "dict" {
+        epid := existing["pid"]
+        if type(epid) == "int" && pid_alive(epid) {
+            return {"ok": false, "error": "service '${id}' is already running (pid ${epid})", "pid": epid, "log_file": log_path(id)}
+        }
+    }
+
+    ensure_dirs()
+    log_file := log_path(id)
+    # The log path must be absolute: the command cd's into the service's working
+    # directory first, so a relative redirect target would resolve against the
+    # wrong directory and the spawn would fail.
+    log_abs := absolutize(log_file)
+    cwd := svc["cwd"]
+    if type(cwd) == "null" || "${cwd}" == "" {
+        cwd = "."
+    }
+    if path_is_dir(cwd) == false {
+        return fail("service '${id}' cwd does not exist: ${cwd}")
+    }
+
+    # Background the configured command, detached, with stdout+stderr captured to
+    # the log file, and echo the new PID so we can record it.
+    full := "cd " + shq(cwd) + " && nohup " + "${start_cmd}" + " > " + shq(log_abs) + " 2>&1 & echo $!"
+    r := execute_status(full)
+    pid := parse_int(trim("${r.stdout}"))
+    if type(pid) != "int" || pid <= 0 {
+        return fail("failed to start '${id}': ${r.stderr}")
+    }
+
+    restart_count := 0
+    if type(existing) == "dict" && truthy(has_key(existing, "restart_count")) {
+        restart_count = existing["restart_count"]
+    }
+    state[id] := new_entry(pid, log_file, "${start_cmd}", restart_count)
+    save_state(state)
+    return {"ok": true, "error": null, "pid": pid, "log_file": log_file}
+}
+
+# Stop a process by PID. `force` selects SIGKILL (-9) over the default graceful
+# SIGTERM. Idempotent: stopping an already-dead PID is reported as success.
+export func stop_pid(pid, force) {
+    if type(pid) != "int" || pid <= 0 {
+        return {"ok": false, "error": "invalid pid", "signal": null}
+    }
+    if pid_alive(pid) == false {
+        return {"ok": true, "error": null, "signal": "none", "note": "process ${pid} was already gone"}
+    }
+    signal := "TERM"
+    if truthy(force) {
+        signal = "KILL"
+    }
+    r := execute_status("kill -${signal} ${pid}")
+    if r.exitcode != 0 {
+        return {"ok": false, "error": trim("${r.stderr}"), "signal": signal}
+    }
+    return {"ok": true, "error": null, "signal": signal}
+}
+
+# Stop a managed service. Prefers the live listening PID (passed in by the
+# status layer), falling back to the PID Yard recorded at start. Clears the
+# tracked PID on a successful graceful stop.
+export func stop_service(svc, live_pid, force) {
+    id := svc["id"]
+    state := load_state()
+    entry := get_entry(state, id)
+    pid := live_pid
+    if type(pid) != "int" || pid <= 0 {
+        if type(entry) == "dict" {
+            pid = entry["pid"]
+        }
+    }
+    if type(pid) != "int" || pid <= 0 {
+        return {"ok": false, "error": "no running process found for '${id}'", "signal": null}
+    }
+    res := stop_pid(pid, force)
+    if truthy(res["ok"]) && type(entry) == "dict" {
+        entry["pid"] := null
+        entry["stopped_at"] := "stopped"
+        state[id] := entry
+        save_state(state)
+    }
+    return res
+}
+
+# Restart a managed service: graceful stop of the current process, then start.
+# Increments the restart counter. Note Yard does not sleep between stop and
+# start; a server that is slow to release its port may need a manual retry.
+export func restart_service(svc, live_pid) {
+    id := svc["id"]
+    if type(svc["start"]) == "null" || "${svc["start"]}" == "" {
+        return {"ok": false, "error": "service '${id}' has no 'start' command; cannot restart", "pid": null}
+    }
+
+    state := load_state()
+    entry := get_entry(state, id)
+    prior_restarts := 0
+    if type(entry) == "dict" && truthy(has_key(entry, "restart_count")) {
+        prior_restarts = entry["restart_count"]
+    }
+
+    pid := live_pid
+    if type(pid) != "int" || pid <= 0 {
+        if type(entry) == "dict" {
+            pid = entry["pid"]
+        }
+    }
+    if type(pid) == "int" && pid > 0 {
+        stop_pid(pid, false)
+    }
+
+    res := start_service(svc)
+    if truthy(res["ok"]) {
+        st2 := load_state()
+        e2 := get_entry(st2, id)
+        if type(e2) == "dict" {
+            e2["restart_count"] := prior_restarts + 1
+            st2[id] := e2
+            save_state(st2)
+        }
+    }
+    return res
+}
+
+func fail(message) {
+    return {"ok": false, "error": message, "pid": null, "log_file": null}
+}
+
+# Resolve a possibly-relative path against the current working directory.
+func absolutize(p) {
+    s := "${p}"
+    if len(s) >= 1 && substring(s, 0, 1) == "/" {
+        return s
+    }
+    return join_path(os_getcwd(), s)
+}

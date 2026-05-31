@@ -1,0 +1,284 @@
+# Yard test suite.
+#
+# A self-contained harness exercising the library modules directly — the same
+# functions the CLI and web API delegate to. It uses throwaway config files
+# under the system temp directory and needs no network and no privileges.
+#
+# Run with:
+#   ruff run tests/yard_test.ruff
+# (or ./tests/run.sh). Exits non-zero if any assertion fails.
+#
+# NOTE: the built-in `test "..." {}` framework cannot see file-level imports on
+# the current runtime, so this hand-rolled harness is used instead. It runs on
+# the standard `ruff run` path where module imports work normally.
+
+from src.util import truthy, includes, split_ws, last_segment, drop_last_segment, expand_home, contains_ci, to_ms
+from src.knownports import known_label, is_known_port, is_sensitive, infer_kind
+from src.config import load, service_for_port, service_by_id
+from src.health import interpret
+from src.ports import parse_lsof
+from src.status import summarize
+
+mut passed := 0
+mut failed := 0
+
+func check(cond, name) {
+    if cond == true {
+        passed = passed + 1
+    } else {
+        failed = failed + 1
+        print("  FAIL: " + name)
+    }
+}
+
+func check_eq(actual, expected, name) {
+    if "${actual}" == "${expected}" {
+        passed = passed + 1
+    } else {
+        failed = failed + 1
+        print("  FAIL: " + name + " (expected ${expected}, got ${actual})")
+    }
+}
+
+# ---------------------------------------------------------------------------
+# util
+# ---------------------------------------------------------------------------
+
+func test_util() {
+    check(truthy(1), "truthy(1)")
+    check(truthy(true), "truthy(true)")
+    check(truthy(0) == false, "truthy(0) is false")
+    check(includes([1, 2, 3], 2), "includes finds member")
+    check(includes([1, 2, 3], 9) == false, "includes rejects non-member")
+    check_eq(len(split_ws("  a   b\tc ")), 3, "split_ws collapses whitespace")
+    check_eq(last_segment("127.0.0.1:3000", ":"), "3000", "last_segment port")
+    check_eq(drop_last_segment("127.0.0.1:3000", ":"), "127.0.0.1", "drop_last_segment address")
+    check_eq(last_segment("[::1]:5000", ":"), "5000", "last_segment ipv6 port")
+    check(contains_ci("PostgreSQL Server", "postgres"), "contains_ci case-insensitive")
+    check_eq(to_ms(0.0421), 42, "to_ms rounds seconds to ms")
+    home := env_or("HOME", "/home/x")
+    check_eq(expand_home("~/code"), home + "/code", "expand_home expands tilde")
+    check_eq(expand_home("/abs/path"), "/abs/path", "expand_home leaves absolute paths")
+}
+
+# ---------------------------------------------------------------------------
+# known ports + sensitive detection
+# ---------------------------------------------------------------------------
+
+func test_known_ports() {
+    check_eq(known_label(3000), "Node / React / Next.js", "known label 3000")
+    check_eq(known_label(5173), "Vite", "known label 5173")
+    check_eq(known_label(11434), "Ollama", "known label 11434")
+    check(is_known_port(5432), "5432 is a known port")
+    check(is_known_port(61234) == false, "random high port is unknown")
+    check(type(known_label(61234)) == "null", "unknown port has null label")
+}
+
+func test_sensitive() {
+    check(is_sensitive(5432, null), "postgres port sensitive")
+    check(is_sensitive(3306, null), "mysql port sensitive")
+    check(is_sensitive(6379, null), "redis port sensitive")
+    check(is_sensitive(27017, null), "mongo port sensitive")
+    check(is_sensitive(2375, null), "docker daemon port sensitive")
+    check(is_sensitive(11434, null), "ollama port sensitive")
+    check(is_sensitive(3000, null) == false, "node port not sensitive by port")
+    check(is_sensitive(6000, "postgres -D /data"), "postgres command sensitive on odd port")
+    check(is_sensitive(7777, "node server.js") == false, "plain node not sensitive")
+    check_eq(infer_kind(5432, "postgres"), "datastore", "infer_kind datastore")
+    check_eq(infer_kind(3000, "node server.js"), "node", "infer_kind node")
+    check_eq(infer_kind(8000, "python -m uvicorn"), "python", "infer_kind python")
+}
+
+# ---------------------------------------------------------------------------
+# health interpretation
+# ---------------------------------------------------------------------------
+
+func test_health() {
+    a := interpret(0, "200 0.0421")
+    check_eq(a["status"], "healthy", "200 -> healthy")
+    check_eq(a["http_status"], 200, "200 -> http_status 200")
+    check_eq(a["response_ms"], 42, "200 -> 42ms")
+    b := interpret(0, "503 0.012")
+    check_eq(b["status"], "unhealthy", "503 -> unhealthy")
+    c := interpret(28, "000 0.000")
+    check_eq(c["status"], "timeout", "exit 28 -> timeout")
+    d := interpret(0, "000 0.001")
+    check_eq(d["status"], "not_http", "000 -> not_http")
+    e := interpret(7, "")
+    check_eq(e["status"], "unknown", "exit 7 -> unknown")
+    f := interpret(52, "")
+    check_eq(f["status"], "not_http", "exit 52 -> not_http")
+}
+
+# ---------------------------------------------------------------------------
+# scanner parser
+# ---------------------------------------------------------------------------
+
+func test_parse_lsof() {
+    sample := lsof_sample()
+    procs := parse_lsof(sample)
+    # 3 unique ports: 3000, 5432, 49218 (the two 3000 rows dedupe to one)
+    check_eq(len(procs), 3, "parse_lsof dedupes by port")
+    first := procs[0]
+    check_eq(first["port"], 3000, "first port 3000")
+    check_eq(first["pid"], 12345, "first pid")
+    check_eq(first["process_name"], "node", "first command name")
+    check_eq(first["user"], "dev", "first user")
+    check(type(parse_lsof("")) == "array", "empty input yields array")
+    check_eq(len(parse_lsof("garbage line with too few cols")), 0, "garbage parses to nothing")
+}
+
+func lsof_sample() {
+    h := "COMMAND     PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME"
+    r1 := "node      12345  dev   23u  IPv4 0x1111111111111111      0t0  TCP 127.0.0.1:3000 (LISTEN)"
+    r2 := "node      12345  dev   24u  IPv6 0x2222222222222222      0t0  TCP [::1]:3000 (LISTEN)"
+    r3 := "postgres   6789  dev    7u  IPv4 0x3333333333333333      0t0  TCP 127.0.0.1:5432 (LISTEN)"
+    r4 := "rapportd    664  dev   10u  IPv4 0x4444444444444444      0t0  TCP *:49218 (LISTEN)"
+    return h + "\n" + r1 + "\n" + r2 + "\n" + r3 + "\n" + r4
+}
+
+# ---------------------------------------------------------------------------
+# config parsing + matching
+# ---------------------------------------------------------------------------
+
+func test_config() {
+    dir := join_path(env_or("TMPDIR", "/tmp"), "yard-test-${now()}")
+    create_dir(dir)
+
+    # Missing file -> empty, not an error.
+    miss := load(join_path(dir, "nope.json"))
+    check(miss["exists"] == false, "missing config not exists")
+    check_eq(len(miss["services"]), 0, "missing config has no services")
+    check_eq(len(miss["errors"]), 0, "missing config has no errors")
+
+    # Valid config.
+    valid := join_path(dir, "valid.json")
+    write_json(valid, valid_config())
+    cfg := load(valid)
+    check(cfg["exists"], "valid config exists")
+    check_eq(len(cfg["services"]), 2, "valid config has 2 services")
+    check_eq(cfg["services"][0]["id"], "ruff-site", "first service id")
+    check_eq(cfg["services"][0]["group"], "Ruff/Kujo", "first service group")
+
+    # Matching by port.
+    m := service_for_port(cfg["services"], 5173)
+    check(type(m) == "dict", "matched service by port")
+    check_eq(m["id"], "spiel-app", "matched the right service")
+    check(type(service_for_port(cfg["services"], 9999)) == "null", "no match for unconfigured port")
+    check_eq(service_by_id(cfg["services"], "ruff-site")["port"], 3000, "lookup by id")
+
+    # Invalid JSON.
+    badjson := join_path(dir, "bad.json")
+    write_text(badjson, "{ not valid json ]")
+    bad := load(badjson)
+    check(len(bad["errors"]) > 0, "invalid JSON reports an error")
+    check_eq(len(bad["services"]), 0, "invalid JSON yields no services")
+
+    # Duplicate ids + ports produce warnings, keep first.
+    dup := join_path(dir, "dup.json")
+    write_json(dup, dup_config())
+    dcfg := load(dup)
+    check(len(dcfg["warnings"]) > 0, "duplicates produce warnings")
+    check_eq(len(dcfg["services"]), 1, "duplicate id keeps a single service")
+
+    # Bare top-level array is accepted.
+    bare := join_path(dir, "bare.json")
+    write_text(bare, "[ {\"id\":\"a\",\"name\":\"A\",\"port\":7001} ]")
+    bcfg := load(bare)
+    check_eq(len(bcfg["services"]), 1, "bare array config parsed")
+
+    # Missing required fields are skipped with an error.
+    invalid := join_path(dir, "invalid.json")
+    write_text(invalid, "{\"services\":[{\"name\":\"no id or port\"}]}")
+    icfg := load(invalid)
+    check_eq(len(icfg["services"]), 0, "service missing id/port skipped")
+    check(len(icfg["errors"]) > 0, "missing required fields reported")
+}
+
+func valid_config() {
+    return {
+        "services": [
+            {"id": "ruff-site", "name": "Ruff Site", "group": "Ruff/Kujo", "port": 3000, "cwd": "~/code/ruff-site", "start": "npm run dev", "health": "http://127.0.0.1:3000", "open": "http://127.0.0.1:3000"},
+            {"id": "spiel-app", "name": "Spiel App", "group": "Apps", "port": 5173, "cwd": "~/code/spiel", "start": "cargo run"}
+        ]
+    }
+}
+
+func dup_config() {
+    return {
+        "services": [
+            {"id": "dupe", "name": "First", "port": 8000},
+            {"id": "dupe", "name": "Second", "port": 8000}
+        ]
+    }
+}
+
+func write_json(path, obj) {
+    write_text(path, to_json_pretty(obj))
+}
+
+func write_text(path, text) {
+    if file_exists(path) {
+        delete_file(path)
+    }
+    write_file(path, text)
+}
+
+# ---------------------------------------------------------------------------
+# status summary
+# ---------------------------------------------------------------------------
+
+func test_summarize() {
+    statuses := [
+        fake_status("running", true, false, "healthy", false),
+        fake_status("running", false, false, "healthy", false),
+        fake_status("running", false, true, "not_http", false),
+        fake_status("running", true, false, "unhealthy", false),
+        fake_status("running", true, false, "healthy", true),
+        fake_status("stopped", true, false, "unknown", false)
+    ]
+    s := summarize(statuses)
+    check_eq(s["running_ports"], 5, "summary running count")
+    check_eq(s["managed_running"], 3, "summary managed running")
+    check_eq(s["unknown_ports"], 2, "summary unknown running")
+    check_eq(s["unhealthy"], 1, "summary unhealthy")
+    check_eq(s["sensitive"], 1, "summary sensitive")
+    check_eq(s["conflicts"], 1, "summary conflicts")
+    check_eq(s["stopped_managed"], 1, "summary stopped managed")
+    check_eq(s["managed_total"], 4, "summary managed total")
+}
+
+func fake_status(state, managed, sensitive, health, conflict) {
+    return {
+        "state": state,
+        "managed": managed,
+        "sensitive": sensitive,
+        "health_status": health,
+        "conflict": conflict
+    }
+}
+
+# ---------------------------------------------------------------------------
+# runner
+# ---------------------------------------------------------------------------
+
+func main() {
+    print("Yard test suite")
+    print("")
+    test_util()
+    test_known_ports()
+    test_sensitive()
+    test_health()
+    test_parse_lsof()
+    test_config()
+    test_summarize()
+    print("")
+    total := passed + failed
+    print("Ran ${total} checks: ${passed} passed, ${failed} failed")
+    if failed > 0 {
+        exit(1)
+    }
+    exit(0)
+}
+
+main()

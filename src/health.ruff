@@ -1,0 +1,74 @@
+# Yard :: health
+#
+# Lightweight, time-boxed HTTP health probing via curl. The goal is a fast,
+# honest signal — "did this port answer an HTTP request, and how quickly" —
+# without ever hanging the dashboard on a slow or non-HTTP service. Sensitive
+# services (databases, model servers) are deliberately NOT probed over HTTP:
+# speaking HTTP at a Postgres socket is pointless and just risks log noise, so
+# we report them as not_http and move on.
+#
+# Status vocabulary: healthy | unhealthy | timeout | not_http | unknown.
+
+from src.util import to_ms
+
+# Probe `url` with a hard timeout (seconds). Returns:
+#   { "status": str, "http_status": int|null, "response_ms": int|null }
+export func check(url, timeout_secs) {
+    if type(url) != "null" && contains("${url}", "'") {
+        return result("unknown", null, null)
+    }
+    secs := "${timeout_secs}"
+    cmd := "curl -s -o /dev/null -w '%{http_code} %{time_total}' --max-time ${secs} '${url}'"
+    r := execute_status(cmd)
+    return interpret(r.exitcode, "${r.stdout}")
+}
+
+# Map a curl exit code + "<http_code> <time_total>" output line into a health
+# result. Exposed for unit testing without invoking curl.
+export func interpret(exit_code, stdout) {
+    parts := split(trim(stdout), " ")
+    code := 0
+    secs := 0.0
+    if len(parts) >= 1 && parts[0] != "" {
+        code = parse_int(parts[0])
+        if type(code) != "int" {
+            code = 0
+        }
+    }
+    if len(parts) >= 2 {
+        f := parse_float(parts[1])
+        if type(f) == "float" {
+            secs = f
+        }
+    }
+    ms := to_ms(secs)
+
+    if exit_code == 28 {
+        return result("timeout", null, ms)
+    }
+    if exit_code == 0 {
+        if code >= 200 && code <= 399 {
+            return result("healthy", code, ms)
+        }
+        if code >= 400 && code <= 599 {
+            return result("unhealthy", code, ms)
+        }
+        # Connected but no recognizable HTTP status (e.g. raw TCP service).
+        return result("not_http", null, ms)
+    }
+    if exit_code == 7 {
+        # Connection refused: listed by lsof but not accepting right now.
+        return result("unknown", null, null)
+    }
+    # 52 empty reply, 56 recv error, 1 unsupported protocol, etc.
+    return result("not_http", null, null)
+}
+
+func result(status, http_status, response_ms) {
+    return {"status": status, "http_status": http_status, "response_ms": response_ms}
+}
+
+# A non-probing result for services we choose not to hit over HTTP.
+export func skipped(reason) {
+    return {"status": reason, "http_status": null, "response_ms": null}
+}
