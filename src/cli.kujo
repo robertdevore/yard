@@ -3,7 +3,7 @@
 # Command dispatch. The default command (no args) starts the dashboard server;
 # the rest are convenience wrappers around the same safe primitives the web API
 # uses, so the CLI can never do anything the dashboard could not. All process
-# control still flows through src/process.ruff, which only ever runs configured
+# control still flows through src/process.kujo, which only ever runs configured
 # commands and graceful-by-default signals.
 #
 # Exit codes: 0 ok, 1 operational failure, 2 usage error.

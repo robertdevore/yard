@@ -5,12 +5,12 @@
 # under the system temp directory and needs no network and no privileges.
 #
 # Run with:
-#   ruff run tests/yard_test.ruff
+#   kujo run tests/yard_test.kujo
 # (or ./tests/run.sh). Exits non-zero if any assertion fails.
 #
 # NOTE: the built-in `test "..." {}` framework cannot see file-level imports on
 # the current runtime, so this hand-rolled harness is used instead. It runs on
-# the standard `ruff run` path where module imports work normally.
+# the standard `kujo run` path where module imports work normally.
 
 from src.util import truthy, includes, split_ws, last_segment, drop_last_segment, expand_home, contains_ci, to_ms
 from src.knownports import known_label, is_known_port, is_sensitive, infer_kind
@@ -157,15 +157,15 @@ func test_config() {
     cfg := load(valid)
     check(cfg["exists"], "valid config exists")
     check_eq(len(cfg["services"]), 2, "valid config has 2 services")
-    check_eq(cfg["services"][0]["id"], "ruff-site", "first service id")
-    check_eq(cfg["services"][0]["group"], "Ruff/Kujo", "first service group")
+    check_eq(cfg["services"][0]["id"], "kujo-site", "first service id")
+    check_eq(cfg["services"][0]["group"], "Kujo", "first service group")
 
     # Matching by port.
     m := service_for_port(cfg["services"], 5173)
     check(type(m) == "dict", "matched service by port")
     check_eq(m["id"], "spiel-app", "matched the right service")
     check(type(service_for_port(cfg["services"], 9999)) == "null", "no match for unconfigured port")
-    check_eq(service_by_id(cfg["services"], "ruff-site")["port"], 3000, "lookup by id")
+    check_eq(service_by_id(cfg["services"], "kujo-site")["port"], 3000, "lookup by id")
 
     # Invalid JSON.
     badjson := join_path(dir, "bad.json")
@@ -198,7 +198,7 @@ func test_config() {
 func valid_config() {
     return {
         "services": [
-            {"id": "ruff-site", "name": "Ruff Site", "group": "Ruff/Kujo", "port": 3000, "cwd": "~/code/ruff-site", "start": "npm run dev", "health": "http://127.0.0.1:3000", "open": "http://127.0.0.1:3000"},
+            {"id": "kujo-site", "name": "Kujo Site", "group": "Kujo", "port": 3000, "cwd": "~/code/kujo-site", "start": "npm run dev", "health": "http://127.0.0.1:3000", "open": "http://127.0.0.1:3000"},
             {"id": "spiel-app", "name": "Spiel App", "group": "Apps", "port": 5173, "cwd": "~/code/spiel", "start": "cargo run"}
         ]
     }

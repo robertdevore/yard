@@ -5,7 +5,7 @@
 # these touch the network, the filesystem, or any process.
 
 # Truthiness for the 1/0 predicate builtins (contains / has_key / ...). Some
-# Ruff predicates return 1/0 and some return true/false; normalize both here.
+# Kujo predicates return 1/0 and some return true/false; normalize both here.
 export func truthy(flag) {
     return flag == 1 || flag == true
 }
@@ -56,7 +56,7 @@ export func pad_left(text, width) {
 # Membership test that tolerates the predicate return-type quirks. Works for
 # arrays of strings or numbers.
 # NOTE: helper functions that get called from inside other functions' loops use
-# uniquely-named locals (not i/n). The Ruff VM can let a callee's same-named
+# uniquely-named locals (not i/n). The Kujo VM can let a callee's same-named
 # local clobber the caller's live local when several such helpers are invoked in
 # one hot loop, which silently truncates the caller's iteration. Unique names in
 # the leaf helpers make that impossible.

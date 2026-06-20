@@ -2,13 +2,13 @@
 #
 # The single-page dashboard, served as one self-contained HTML document (no
 # build step, no external assets, no CDN). It is assembled from several string
-# fragments because the Ruff lexer caps individual string literals at 8 KB.
+# fragments because the Kujo lexer caps individual string literals at 8 KB.
 #
-# Conventions to keep this valid Ruff source:
+# Conventions to keep this valid Kujo source:
 #   * HTML attributes and JS strings use single quotes (no escaping needed).
-#   * JS template-literal interpolations are written \${...} so Ruff emits a
+#   * JS template-literal interpolations are written \${...} so Kujo emits a
 #     literal ${...} rather than interpolating them itself.
-#   * The ONLY real Ruff interpolation is ${token}, injected into the page so
+#   * The ONLY real Kujo interpolation is ${token}, injected into the page so
 #     the browser can authorize destructive actions.
 
 # Assemble the full HTML document, embedding the per-session action token.

@@ -2,22 +2,22 @@
 # Yard launcher.
 #
 # Thin convenience wrapper so you can type `yard <command>` instead of
-# `ruff run /path/to/yard.ruff -- <command>`.
+# `kujo run /path/to/yard.kujo -- <command>`.
 #
-# It runs the Ruff interpreter on the project entrypoint, preserving your
+# It runs the Kujo interpreter on the project entrypoint, preserving your
 # current working directory (so the default ./.yard state dir and
 # ./yard.config.json land where you invoke it). Override the interpreter with
-# the RUFF environment variable, e.g.
-#   RUFF=/path/to/ruff/target/release/ruff yard scan
+# the KUJO environment variable, e.g.
+#   KUJO=/path/to/kujo/target/release/kujo yard scan
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUFF="${RUFF:-ruff}"
+KUJO="${KUJO:-kujo}"
 
-if ! command -v "$RUFF" >/dev/null 2>&1 && [ ! -x "$RUFF" ]; then
-  echo "yard: cannot find the Ruff interpreter ('$RUFF')." >&2
-  echo "Set RUFF to your ruff binary, e.g. RUFF=/path/to/ruff/target/release/ruff" >&2
+if ! command -v "$KUJO" >/dev/null 2>&1 && [ ! -x "$KUJO" ]; then
+  echo "yard: cannot find the Kujo interpreter ('$KUJO')." >&2
+  echo "Set KUJO to your kujo binary, e.g. KUJO=/path/to/kujo/target/release/kujo" >&2
   exit 127
 fi
 
-exec "$RUFF" run "$PROJECT_DIR/yard.ruff" -- "$@"
+exec "$KUJO" run "$PROJECT_DIR/yard.kujo" -- "$@"
