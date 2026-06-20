@@ -1,11 +1,11 @@
 {
   "services": [
     {
-      "id": "ruff-site",
-      "name": "Ruff Site",
-      "group": "Ruff/Kujo",
+      "id": "kujo-site",
+      "name": "Kujo Site",
+      "group": "Kujo",
       "port": 3000,
-      "cwd": "~/code/ruff-site",
+      "cwd": "~/code/kujo-site",
       "start": "npm run dev",
       "health": "http://127.0.0.1:3000",
       "open": "http://127.0.0.1:3000",

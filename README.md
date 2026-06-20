@@ -7,7 +7,7 @@ ports, shows you what is running, which project probably owns it, whether it is
 healthy, and lets you safely **stop, force-stop, start, and restart** services
 from one place. The metaphor: every dev server you spin up is *in the yard*.
 
-It is built in [Ruff](https://github.com/rufflang/ruff) and runs on the Ruff
+It is built in [Kujo](https://github.com/kujolang/kujo) and runs on the Kujo
 interpreter. No build step, no Node, no database, no network calls off your
 machine.
 
@@ -48,14 +48,14 @@ processes, which get a purple accent and a clear `unknown` badge.
 
 ## Running it
 
-Yard runs on the Ruff interpreter, so you need a `ruff` binary.
+Yard runs on the Kujo interpreter, so you need a `kujo` binary.
 
 ```bash
 # 1. Get this project
-cd ruff-yard
+cd kujo-yard
 
-# 2. Point Yard at your ruff binary (or put `ruff` on your PATH)
-export RUFF=/path/to/ruff/target/release/ruff
+# 2. Point Yard at your kujo binary (or put `kujo` on your PATH)
+export KUJO=/path/to/kujo/target/release/kujo
 
 # 3. (optional) put the launcher on your PATH
 export PATH="$PWD/bin:$PATH"
@@ -69,7 +69,7 @@ Then open <http://127.0.0.1:9753>.
 You can always invoke it directly without the wrapper:
 
 ```bash
-ruff run /path/to/ruff-yard/yard.ruff -- [command] [arguments]
+kujo run /path/to/kujo-yard/yard.kujo -- [command] [arguments]
 ```
 
 ### CLI
@@ -84,11 +84,11 @@ yard scan                 # list detected services as a table
 yard scan --json          # ...as JSON
 yard scan --no-health     # ...skip health probes (faster)
 yard open                 # open the dashboard in your browser
-yard open ruff-site       # open a managed service's URL
-yard start ruff-site      # start a managed service
-yard stop ruff-site       # graceful stop
-yard stop ruff-site --force --yes   # force kill (requires --yes)
-yard restart ruff-site    # restart a managed service
+yard open kujo-site       # open a managed service's URL
+yard start kujo-site      # start a managed service
+yard stop kujo-site       # graceful stop
+yard stop kujo-site --force --yes   # force kill (requires --yes)
+yard restart kujo-site    # restart a managed service
 yard stop-port 3000       # stop whatever listens on a port
 yard config path          # print the config file path
 yard config show          # dump the parsed config
@@ -164,11 +164,11 @@ Minimal example:
 {
   "services": [
     {
-      "id": "ruff-site",
-      "name": "Ruff Site",
-      "group": "Ruff/Kujo",
+      "id": "kujo-site",
+      "name": "Kujo Site",
+      "group": "Kujo",
       "port": 3000,
-      "cwd": "~/code/ruff-site",
+      "cwd": "~/code/kujo-site",
       "start": "npm run dev",
       "health": "http://127.0.0.1:3000",
       "open": "http://127.0.0.1:3000"
@@ -249,28 +249,28 @@ You should be able to leave Yard running locally without fear.
 ## Architecture
 
 ```
-yard.ruff            entrypoint (args -> cli.main -> exit code)
-bin/yard             bash launcher (ruff run wrapper)
+yard.kujo            entrypoint (args -> cli.main -> exit code)
+bin/yard             bash launcher (kujo run wrapper)
 src/
-  util.ruff          shared helpers (no I/O)
-  knownports.ruff    known-port map + sensitive-service rules
-  ports.ruff         lsof scanner + parser (read-only)
-  config.ruff        config load/validate
-  health.ruff        curl-based health probing + status mapping
-  state.ruff         managed-process state + log capture (./.yard)
-  process.ruff       the ONLY module that signals/starts/stops processes
-  status.ruff        fuses scan + config + state + health into ServiceStatus
-  api.ruff           JSON endpoint logic (pure-ish, testable)
-  web.ruff           the single-page dashboard (self-contained HTML/CSS/JS)
-  serve.ruff         HTTP routes, 127.0.0.1 binding, token enforcement
-  cli.ruff           command dispatch
-tests/yard_test.ruff hand-rolled test harness
+  util.kujo          shared helpers (no I/O)
+  knownports.kujo    known-port map + sensitive-service rules
+  ports.kujo         lsof scanner + parser (read-only)
+  config.kujo        config load/validate
+  health.kujo        curl-based health probing + status mapping
+  state.kujo         managed-process state + log capture (./.yard)
+  process.kujo       the ONLY module that signals/starts/stops processes
+  status.kujo        fuses scan + config + state + health into ServiceStatus
+  api.kujo           JSON endpoint logic (pure-ish, testable)
+  web.kujo           the single-page dashboard (self-contained HTML/CSS/JS)
+  serve.kujo         HTTP routes, 127.0.0.1 binding, token enforcement
+  cli.kujo           command dispatch
+tests/yard_test.kujo hand-rolled test harness
 ```
 
 The layering keeps future features (Docker integration, MCP/Ollama detection, a
 port-conflict resolver, "stop all managed", WebSocket live updates, persisted
-history) additive: new detectors feed `status.ruff`, new actions go through
-`process.ruff`, new endpoints wrap `api.ruff`.
+history) additive: new detectors feed `status.kujo`, new actions go through
+`process.kujo`, new endpoints wrap `api.kujo`.
 
 ## API
 
@@ -295,9 +295,9 @@ include `"token": "<session token>"`.
 ## Tests
 
 ```bash
-ruff run tests/yard_test.ruff
+kujo run tests/yard_test.kujo
 # or
-RUFF=/path/to/ruff ./tests/run.sh
+KUJO=/path/to/kujo ./tests/run.sh
 ```
 
 The suite (72 checks) covers config parsing (valid, missing, invalid JSON, bare
