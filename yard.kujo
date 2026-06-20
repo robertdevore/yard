@@ -5,7 +5,7 @@
 # exit code. With no arguments it starts the local dashboard server.
 #
 # Run with:
-#   kujo run yard.kujo -- <command> [arguments]
+#   kujo run yard.kujo <command> [arguments]
 # or via the bin/yard wrapper:
 #   ./bin/yard [command] [arguments]
 

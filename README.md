@@ -69,7 +69,7 @@ Then open <http://127.0.0.1:9753>.
 You can always invoke it directly without the wrapper:
 
 ```bash
-kujo run /path/to/kujo-yard/yard.kujo -- [command] [arguments]
+kujo run /path/to/kujo-yard/yard.kujo [command] [arguments]
 ```
 
 ### CLI
