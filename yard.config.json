@@ -21,6 +21,16 @@
       "description": "Kujo SignalBox server"
     },
     {
+      "id": "kujo-cms-api",
+      "name": "Kujo - CMS API",
+      "group": "Kujo",
+      "port": 4200,
+      "health": "http://127.0.0.1:4200",
+      "open": "http://127.0.0.1:4200",
+      "tags": ["kujo", "cms", "api", "owned"],
+      "description": "Kujo CMS API server"
+    },
+    {
       "id": "kujo-watchdog",
       "name": "Kujo - Watchdog",
       "group": "Kujo",
