@@ -11,6 +11,36 @@
       "description": "Kujo server running from the RepoRadar project"
     },
     {
+      "id": "kujo-signalbox",
+      "name": "Kujo - SignalBox",
+      "group": "Kujo",
+      "port": 4848,
+      "health": "http://127.0.0.1:4848",
+      "open": "http://127.0.0.1:4848",
+      "tags": ["kujo", "signalbox", "owned"],
+      "description": "Kujo SignalBox server"
+    },
+    {
+      "id": "kujo-watchdog",
+      "name": "Kujo - Watchdog",
+      "group": "Kujo",
+      "port": 7700,
+      "health": "http://127.0.0.1:7700",
+      "open": "http://127.0.0.1:7700",
+      "tags": ["kujo", "watchdog", "owned"],
+      "description": "Kujo Watchdog dashboard server"
+    },
+    {
+      "id": "kujo-yard",
+      "name": "Kujo - Yard",
+      "group": "Kujo",
+      "port": 9753,
+      "health": "http://127.0.0.1:9753",
+      "open": "http://127.0.0.1:9753",
+      "tags": ["kujo", "yard", "owned"],
+      "description": "Yard dashboard server"
+    },
+    {
       "id": "strata",
       "name": "Strata",
       "group": "Strata",
