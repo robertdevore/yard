@@ -1,0 +1,42 @@
+{
+  "services": [
+    {
+      "id": "kujo-reporadar",
+      "name": "Kujo · RepoRadar",
+      "group": "Kujo",
+      "port": 8080,
+      "health": "http://127.0.0.1:8080",
+      "open": "http://127.0.0.1:8080",
+      "tags": ["kujo", "reporadar", "owned"],
+      "description": "Kujo server running from the RepoRadar project"
+    },
+    {
+      "id": "strata",
+      "name": "Strata",
+      "group": "Strata",
+      "port": 3939,
+      "health": "http://127.0.0.1:3939",
+      "open": "http://127.0.0.1:3939",
+      "tags": ["strata", "owned"],
+      "description": "Local Strata memory service"
+    },
+    {
+      "id": "snips",
+      "name": "Snips",
+      "group": "Snips",
+      "port": 50556,
+      "health": "http://127.0.0.1:50556",
+      "open": "http://127.0.0.1:50556",
+      "tags": ["snips", "owned"],
+      "description": "Local Snips service"
+    },
+    {
+      "id": "snips-helper",
+      "name": "Snips Helper",
+      "group": "Snips",
+      "port": 50555,
+      "tags": ["snips", "helper", "owned"],
+      "description": "Snips background helper service"
+    }
+  ]
+}
