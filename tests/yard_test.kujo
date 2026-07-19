@@ -267,6 +267,9 @@ func test_web_status_language() {
     html := index_html("test-token")
     check(contains_ci(html, "untracked"), "dashboard exposes untracked status")
     check(contains_ci(html, "port conflict") == false, "dashboard avoids misleading port conflict label")
+    check(contains_ci(html, "dither-track"), "dashboard includes dithered metric charts")
+    check(contains_ci(html, "managed coverage"), "dashboard groups managed coverage data")
+    check(contains_ci(html, "data-summary-filter"), "dashboard metric charts expose filters")
 }
 
 # ---------------------------------------------------------------------------
