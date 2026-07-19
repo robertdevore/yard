@@ -3,8 +3,8 @@
 # Composition layer. It fuses the four inputs — detected listeners, the managed
 # config, Yard's start-state, and health probes — into the ServiceStatus list
 # the API and UI consume, plus a summary. This is where "managed vs unknown",
-# "sensitive", "which actions are safe", and "is anything squatting on a managed
-# port" are all decided. It performs read-only inspection only.
+# "sensitive", "which actions are safe", and "is this managed listener tracked
+# by Yard" are all decided. It performs read-only inspection only.
 
 from src.util import truthy, includes
 from src.ports import scan, full_command
@@ -88,7 +88,9 @@ func status_for_detected(p, svc, state, do_health, health_timeout_secs) {
             restart_count = entry["restart_count"]
         }
     }
-    conflict := managed && (owned == false)
+    # A managed listener can be healthy and correct without having been started
+    # by Yard. Call that state untracked; it is not evidence of a port conflict.
+    untracked := managed && (owned == false)
 
     health := health_for(svc, managed, sensitive, url, do_health, health_timeout_secs)
 
@@ -114,7 +116,7 @@ func status_for_detected(p, svc, state, do_health, health_timeout_secs) {
         "open_url": open_url,
         "managed": managed,
         "sensitive": sensitive,
-        "conflict": conflict,
+        "untracked": untracked,
         "owned_by_yard": owned,
         "pid": pid,
         "command": cmd_text,
@@ -154,7 +156,7 @@ func status_for_stopped(svc) {
         "open_url": open_url,
         "managed": true,
         "sensitive": sensitive,
-        "conflict": false,
+        "untracked": false,
         "owned_by_yard": false,
         "pid": null,
         "command": null,
@@ -246,7 +248,7 @@ export func summarize(statuses) {
     mut unknown_running := 0
     mut unhealthy := 0
     mut sensitive := 0
-    mut conflicts := 0
+    mut untracked := 0
     mut managed_total := 0
     mut stopped := 0
 
@@ -272,8 +274,8 @@ export func summarize(statuses) {
             if hs == "unhealthy" || hs == "timeout" {
                 unhealthy = unhealthy + 1
             }
-            if s["conflict"] {
-                conflicts = conflicts + 1
+            if s["untracked"] {
+                untracked = untracked + 1
             }
         } else {
             stopped = stopped + 1
@@ -287,7 +289,7 @@ export func summarize(statuses) {
         "unknown_ports": unknown_running,
         "unhealthy": unhealthy,
         "sensitive": sensitive,
-        "conflicts": conflicts,
+        "untracked": untracked,
         "stopped_managed": stopped
     }
 }

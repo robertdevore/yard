@@ -21,7 +21,7 @@ machine.
 ## Why this exists
 
 > Yard helps developers who run many localhost servers see what is active,
-> identify port conflicts, stop zombie processes, and safely restart known
+> identify untracked and unknown listeners, stop zombie processes, and safely restart known
 > project services from one dashboard.
 
 If you routinely have a Next.js app, a Vite frontend, a Python API, Ollama, a
@@ -32,7 +32,7 @@ what port, who owns it, is it healthy, and can I safely stop or restart it?*
 ## What it looks like
 
 * **Summary cards** — running ports, managed running, unknown ports, unhealthy,
-  sensitive, and conflicts.
+  sensitive, untracked, and stopped services.
 * **Service cards**, grouped by project, each showing name, port, status,
   health (status + HTTP code + response time), PID, command, URL, a
   managed/unknown badge, and a sensitive badge where relevant.
@@ -42,7 +42,9 @@ what port, who owns it, is it healthy, and can I safely stop or restart it?*
   group), a refresh button, and an auto-refresh toggle.
 
 Managed services (the ones in your config) are visually distinct from unknown
-processes, which get a purple accent and a clear `unknown` badge.
+processes. A managed listener that Yard did not start or cannot match to its
+stored PID gets a neutral `untracked` badge; this is informational, not a port
+conflict.
 
 ---
 
@@ -310,9 +312,10 @@ garbage tolerance), and the summary aggregation.
 
 * **"lsof unavailable" banner** — install `lsof`, or check permissions. Yard
   only reads listening sockets; it never needs root.
-* **A managed service shows `stopped` but the port is busy** — something Yard
-  didn't start is on that port. That is exactly the `conflict` count; Inspect
-  the unknown process on the same port.
+* **A managed service shows `untracked`** — a process is listening on its
+  configured port, but its PID does not match Yard's stored state. This is
+  common for services started outside Yard and is not, by itself, a conflict.
+  Use Inspect to verify the process when its identity is unexpected.
 * **Start "succeeds" but the service isn't up** — check
   `./.yard/logs/<id>.log`; the process likely exited immediately (bad command,
   wrong `cwd`, missing dependency).

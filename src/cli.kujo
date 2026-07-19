@@ -116,30 +116,33 @@ func cmd_scan(tokens) {
     print_table(services)
     s := summarize(services)
     print("")
-    print("running ${s["running_ports"]}  managed ${s["managed_running"]}/${s["managed_total"]}  unknown ${s["unknown_ports"]}  unhealthy ${s["unhealthy"]}  sensitive ${s["sensitive"]}  conflicts ${s["conflicts"]}")
+    print("running ${s["running_ports"]}  managed ${s["managed_running"]}/${s["managed_total"]}  unknown ${s["unknown_ports"]}  unhealthy ${s["unhealthy"]}  sensitive ${s["sensitive"]}  untracked ${s["untracked"]}")
     return 0
 }
 
 func print_table(services) {
-    print(pad_right("PORT", 7) + pad_right("STATUS", 9) + pad_right("HEALTH", 11) + pad_right("PID", 8) + pad_right("KIND", 8) + pad_right("NAME", 24) + "URL")
+    print(pad_right("PORT", 7) + pad_right("STATUS", 9) + pad_right("HEALTH", 11) + pad_right("PID", 8) + pad_right("KIND", 10) + pad_right("TRACKING", 11) + pad_right("NAME", 24) + "URL")
     mut i := 0
     n := len(services)
     while i < n {
         s := services[i]
         i = i + 1
-        managed := "?"
+        tracking := "unmanaged"
         if s["managed"] {
-            managed = "M"
+            tracking = "untracked"
+            if s["state"] == "stopped" {
+                tracking = "stopped"
+            }
+            if s["owned_by_yard"] {
+                tracking = "yard"
+            }
         }
         flag := ""
         if s["sensitive"] {
             flag = "*"
         }
-        if s["conflict"] {
-            flag = flag + "!"
-        }
-        name := "${display(s["name"])} ${managed}${flag}"
-        print(pad_right("${s["port"]}", 7) + pad_right("${s["state"]}", 9) + pad_right("${s["health_status"]}", 11) + pad_right(display(s["pid"]), 8) + pad_right("${s["kind"]}", 8) + pad_right(name, 24) + display(s["url"]))
+        name := "${display(s["name"])}${flag}"
+        print(pad_right("${s["port"]}", 7) + pad_right("${s["state"]}", 9) + pad_right("${s["health_status"]}", 11) + pad_right(display(s["pid"]), 8) + pad_right("${s["kind"]}", 10) + pad_right(tracking, 11) + pad_right(name, 24) + display(s["url"]))
     }
 }
 

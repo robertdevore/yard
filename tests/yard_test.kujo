@@ -18,6 +18,7 @@ from src.config import load, service_for_port, service_by_id
 from src.health import interpret
 from src.ports import parse_lsof
 from src.status import summarize
+from src.web import index_html
 
 mut passed := 0
 mut failed := 0
@@ -243,19 +244,29 @@ func test_summarize() {
     check_eq(s["unknown_ports"], 2, "summary unknown running")
     check_eq(s["unhealthy"], 1, "summary unhealthy")
     check_eq(s["sensitive"], 1, "summary sensitive")
-    check_eq(s["conflicts"], 1, "summary conflicts")
+    check_eq(s["untracked"], 1, "summary untracked")
     check_eq(s["stopped_managed"], 1, "summary stopped managed")
     check_eq(s["managed_total"], 4, "summary managed total")
 }
 
-func fake_status(state, managed, sensitive, health, conflict) {
+func fake_status(state, managed, sensitive, health, untracked) {
     return {
         "state": state,
         "managed": managed,
         "sensitive": sensitive,
         "health_status": health,
-        "conflict": conflict
+        "untracked": untracked
     }
+}
+
+# ---------------------------------------------------------------------------
+# dashboard status language
+# ---------------------------------------------------------------------------
+
+func test_web_status_language() {
+    html := index_html("test-token")
+    check(contains_ci(html, "untracked"), "dashboard exposes untracked status")
+    check(contains_ci(html, "port conflict") == false, "dashboard avoids misleading port conflict label")
 }
 
 # ---------------------------------------------------------------------------
@@ -272,6 +283,7 @@ func main() {
     test_parse_lsof()
     test_config()
     test_summarize()
+    test_web_status_language()
     print("")
     total := passed + failed
     print("Ran ${total} checks: ${passed} passed, ${failed} failed")
