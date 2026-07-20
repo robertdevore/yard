@@ -12,9 +12,9 @@
 # the current runtime, so this hand-rolled harness is used instead. It runs on
 # the standard `kujo run` path where module imports work normally.
 
-from src.util import truthy, includes, split_ws, last_segment, drop_last_segment, expand_home, contains_ci, to_ms
+from src.util import truthy, includes, split_ws, last_segment, drop_last_segment, expand_home, contains_ci, to_ms, shell_quote
 from src.knownports import known_label, is_known_port, is_sensitive, infer_kind
-from src.config import load, service_for_port, service_by_id
+from src.config import load, resolve_path, service_for_port, service_by_id
 from src.health import interpret
 from src.ports import parse_lsof
 from src.status import summarize
@@ -57,9 +57,11 @@ func test_util() {
     check_eq(last_segment("[::1]:5000", ":"), "5000", "last_segment ipv6 port")
     check(contains_ci("PostgreSQL Server", "postgres"), "contains_ci case-insensitive")
     check_eq(to_ms(0.0421), 42, "to_ms rounds seconds to ms")
+    check_eq(shell_quote("a'b"), "'a'\\''b'", "shell_quote escapes apostrophes")
     home := env_or("HOME", "/home/x")
     check_eq(expand_home("~/code"), home + "/code", "expand_home expands tilde")
     check_eq(expand_home("/abs/path"), "/abs/path", "expand_home leaves absolute paths")
+    check_eq(resolve_path("~/yard.json"), home + "/yard.json", "resolve_path expands tilde")
 }
 
 # ---------------------------------------------------------------------------
@@ -182,6 +184,14 @@ func test_config() {
     check(len(dcfg["warnings"]) > 0, "duplicates produce warnings")
     check_eq(len(dcfg["services"]), 1, "duplicate id keeps a single service")
 
+    # Duplicate ports produce warnings and keep the first mapped service.
+    dup_port := join_path(dir, "dup-port.json")
+    write_json(dup_port, dup_port_config())
+    pcfg := load(dup_port)
+    check(len(pcfg["warnings"]) > 0, "duplicate ports produce warnings")
+    check_eq(len(pcfg["services"]), 1, "duplicate port keeps a single service")
+    check_eq(service_for_port(pcfg["services"], 8123)["id"], "first", "duplicate port keeps first service")
+
     # Bare top-level array is accepted.
     bare := join_path(dir, "bare.json")
     write_text(bare, "[ {\"id\":\"a\",\"name\":\"A\",\"port\":7001} ]")
@@ -194,6 +204,18 @@ func test_config() {
     icfg := load(invalid)
     check_eq(len(icfg["services"]), 0, "service missing id/port skipped")
     check(len(icfg["errors"]) > 0, "missing required fields reported")
+
+    bad_port := join_path(dir, "bad-port.json")
+    write_json(bad_port, bad_port_config())
+    bpcfg := load(bad_port)
+    check_eq(len(bpcfg["services"]), 1, "invalid ports are skipped")
+    check(len(bpcfg["errors"]) >= 3, "invalid ports reported")
+
+    bad_id := join_path(dir, "bad-id.json")
+    write_json(bad_id, bad_id_config())
+    bicfg := load(bad_id)
+    check_eq(len(bicfg["services"]), 1, "invalid ids are skipped")
+    check(len(bicfg["errors"]) >= 3, "invalid ids reported")
 }
 
 func valid_config() {
@@ -210,6 +232,38 @@ func dup_config() {
         "services": [
             {"id": "dupe", "name": "First", "port": 8000},
             {"id": "dupe", "name": "Second", "port": 8000}
+        ]
+    }
+}
+
+func dup_port_config() {
+    return {
+        "services": [
+            {"id": "first", "name": "First", "port": 8123},
+            {"id": "second", "name": "Second", "port": 8123}
+        ]
+    }
+}
+
+func bad_port_config() {
+    return {
+        "services": [
+            {"id": "zero", "port": 0},
+            {"id": "too-high", "port": 70000},
+            {"id": "negative", "port": -1},
+            {"id": "partial", "port": "3000abc"},
+            {"id": "good", "port": "3000"}
+        ]
+    }
+}
+
+func bad_id_config() {
+    return {
+        "services": [
+            {"id": "", "port": 3000},
+            {"id": "../escape", "port": 3001},
+            {"id": "has space", "port": 3002},
+            {"id": "good.id_1-2", "port": 3003}
         ]
     }
 }
@@ -270,6 +324,9 @@ func test_web_status_language() {
     check(contains_ci(html, "dither-track"), "dashboard includes dithered metric charts")
     check(contains_ci(html, "managed coverage"), "dashboard groups managed coverage data")
     check(contains_ci(html, "data-summary-filter"), "dashboard metric charts expose filters")
+    check(contains_ci(html, "join('&#39;')"), "dashboard escapes apostrophes in attributes")
+    check(contains_ci(html, "encodeURIComponent(s.id)"), "dashboard encodes service ids in API paths")
+    check(contains_ci(html, "if(!viewReady)applyViewFromUrl()"), "dashboard reapplies URL filters after groups load")
 }
 
 # ---------------------------------------------------------------------------
