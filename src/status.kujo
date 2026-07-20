@@ -206,6 +206,9 @@ func inferred_url(port, address) {
     if a != "*" && a != "" && a != "127.0.0.1" && a != "[::1]" && a != "::1" && a != "0.0.0.0" {
         host = a
     }
+    if truthy(contains(host, ":")) && substring(host, 0, 1) != "[" {
+        host = "[" + host + "]"
+    }
     return "http://${host}:${port}"
 }
 

@@ -150,6 +150,13 @@ export func contains_any_ci(haystack, needles) {
     return false
 }
 
+# POSIX-escape a value for safe single-quoted inclusion in shell commands.
+export func shell_quote(value) {
+    s := "${value}"
+    escaped := replace_str(s, "'", "'\\''")
+    return "'" + escaped + "'"
+}
+
 # Expand a leading "~" in a path to the user's home directory. Leaves other
 # paths untouched. Used for managed-service cwd values from config.
 export func expand_home(path) {

@@ -9,16 +9,16 @@
 #
 # Status vocabulary: healthy | unhealthy | timeout | not_http | unknown.
 
-from src.util import to_ms
+from src.util import to_ms, shell_quote
 
 # Probe `url` with a hard timeout (seconds). Returns:
 #   { "status": str, "http_status": int|null, "response_ms": int|null }
 export func check(url, timeout_secs) {
-    if type(url) != "null" && contains("${url}", "'") {
+    if type(url) == "null" || "${url}" == "" {
         return result("unknown", null, null)
     }
     secs := "${timeout_secs}"
-    cmd := "curl -s -o /dev/null -w '%{http_code} %{time_total}' --max-time ${secs} '${url}'"
+    cmd := "curl -s -o /dev/null -w '%{http_code} %{time_total}' --max-time ${secs} " + shell_quote(url)
     r := execute_status(cmd)
     return interpret(r.exitcode, "${r.stdout}")
 }

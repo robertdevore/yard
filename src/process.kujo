@@ -9,16 +9,9 @@
 # Commands are single-quoted with POSIX-safe escaping. Shell metacharacters in a
 # config value therefore cannot break out of the intended command.
 
-from src.util import truthy
+from src.util import truthy, shell_quote
 from src.ports import pid_alive
 from src.state import load_state, save_state, get_entry, new_entry, log_path, ensure_dirs
-
-# POSIX-escape a value for safe single-quoted inclusion in a shell command.
-func shq(value) {
-    s := "${value}"
-    escaped := replace_str(s, "'", "'\\''")
-    return "'" + escaped + "'"
-}
 
 # Start a managed service. `svc` is a validated ServiceConfig. Returns:
 #   { "ok": bool, "error": str|null, "pid": int|null, "log_file": str }
@@ -55,7 +48,7 @@ export func start_service(svc) {
 
     # Background the configured command, detached, with stdout+stderr captured to
     # the log file, and echo the new PID so we can record it.
-    full := "cd " + shq(cwd) + " && nohup " + "${start_cmd}" + " > " + shq(log_abs) + " 2>&1 & echo $!"
+    full := "cd " + shell_quote(cwd) + " && nohup " + "${start_cmd}" + " > " + shell_quote(log_abs) + " 2>&1 & echo $!"
     r := execute_status(full)
     pid := parse_int(trim("${r.stdout}"))
     if type(pid) != "int" || pid <= 0 {

@@ -12,9 +12,9 @@ from src.util import truthy, includes, expand_home
 # Resolve the config path: explicit arg > $YARD_CONFIG > ./yard.config.json.
 export func resolve_path(explicit) {
     if type(explicit) != "null" && "${explicit}" != "" {
-        return "${explicit}"
+        return expand_home("${explicit}")
     }
-    return env_or("YARD_CONFIG", "yard.config.json")
+    return expand_home(env_or("YARD_CONFIG", "yard.config.json"))
 }
 
 # Load and validate the config at `path`. Always returns a structured result:
@@ -105,13 +105,17 @@ func validate_services(raw_services) {
             continue
         }
         id := "${entry["id"]}"
+        if valid_id(id) == false {
+            errors = push(errors, "service #${idx} has an invalid 'id' (use letters, numbers, dot, underscore, or hyphen)")
+            continue
+        }
         if truthy(has_key(entry, "port")) == false {
             errors = push(errors, "service '${id}' is missing required 'port'")
             continue
         }
         port := normalize_port(entry["port"])
         if type(port) != "int" {
-            errors = push(errors, "service '${id}' has a non-numeric 'port'")
+            errors = push(errors, "service '${id}' has an invalid 'port' (must be 1-65535)")
             continue
         }
         if includes(seen_ids, id) {
@@ -119,7 +123,8 @@ func validate_services(raw_services) {
             continue
         }
         if includes(seen_ports, port) {
-            warnings = push(warnings, "duplicate configured port ${port} (service '${id}')")
+            warnings = push(warnings, "duplicate configured port ${port} (service '${id}' ignored)")
+            continue
         }
         seen_ids = push(seen_ids, id)
         seen_ports = push(seen_ports, port)
@@ -129,13 +134,54 @@ func validate_services(raw_services) {
 }
 
 func normalize_port(value) {
+    mut port := null
     if type(value) == "int" {
-        return value
+        port = value
+    } else {
+        if type(value) == "string" {
+            if numeric_string(value) {
+                port = parse_int(value)
+            }
+        }
     }
-    if type(value) == "string" {
-        return parse_int(value)
+    if type(port) == "int" && port >= 1 && port <= 65535 {
+        return port
     }
     return null
+}
+
+func numeric_string(value) {
+    s := "${value}"
+    if s == "" {
+        return false
+    }
+    mut ns_i := 0
+    ns_n := len(s)
+    while ns_i < ns_n {
+        ch := substring(s, ns_i, ns_i + 1)
+        if truthy(contains("0123456789", ch)) == false {
+            return false
+        }
+        ns_i = ns_i + 1
+    }
+    return true
+}
+
+func valid_id(id) {
+    if id == "" {
+        return false
+    }
+    allowed := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+    mut vi_i := 0
+    vi_n := len(id)
+    while vi_i < vi_n {
+        ch := substring(id, vi_i, vi_i + 1)
+        if truthy(contains(allowed, ch)) == false {
+            return false
+        }
+        vi_i = vi_i + 1
+    }
+    return true
 }
 
 # Build a normalized ServiceConfig with predictable keys, defaulting optional

@@ -15,7 +15,7 @@ from src.ports import scan, full_command, pids_on_port
 from src.process import start_service, stop_service, restart_service, stop_pid
 from src.status import build_services, summarize
 from src.knownports import is_sensitive
-from src.util import truthy, display, pad_right, pad_left
+from src.util import truthy, display, pad_right, pad_left, shell_quote
 
 VERSION := "0.1.0"
 DEFAULT_PORT := 9753
@@ -275,7 +275,8 @@ func cmd_open(tokens) {
             url = "http://127.0.0.1:${svc["port"]}"
         }
     }
-    r := execute_status("open '${url}' || xdg-open '${url}'")
+    quoted := shell_quote(url)
+    r := execute_status("open " + quoted + " || xdg-open " + quoted)
     if r.exitcode != 0 {
         print(url)
     } else {
