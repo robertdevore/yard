@@ -39,7 +39,7 @@ what port, who owns it, is it healthy, and can I safely stop or restart it?*
 * **Actions** — Open, Copy, Start, Stop, Restart, Force, Logs, Inspect, Claim —
   shown only when they are valid for that service.
 * **Controls** — search, group filter, status filter, sort (port/name/status/
-  group), a refresh button, and an auto-refresh toggle.
+  group), a refresh button, and always-on auto-refresh.
 
 Managed services (the ones in your config) are visually distinct from unknown
 processes. A managed listener that Yard did not start or cannot match to its
