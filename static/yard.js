@@ -19,6 +19,28 @@ function element(tag, text, className) {
   return node;
 }
 
+const iconPaths = {
+  open: 'M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6',
+  start: 'M6 3l14 9-14 9V3z',
+  stop: 'M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0zM8 8h8v8H8z',
+  restart: 'M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8m0-5v5h-5m5 4a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16m5 0H3v5',
+  force: 'M7.86 2h8.28L22 7.86v8.28L16.14 22H7.86L2 16.14V7.86zM12 8v5m0 4h.01',
+  logs: 'M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7zM14 2v4a2 2 0 0 0 2 2h4M8 9h2m-2 4h8m-8 4h8',
+};
+
+function addIcon(node, name) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const icon = document.createElementNS(ns, 'svg');
+  const path = document.createElementNS(ns, 'path');
+  icon.setAttribute('class', 'icon');
+  icon.setAttribute('aria-hidden', 'true');
+  icon.setAttribute('viewBox', '0 0 24 24');
+  path.setAttribute('d', iconPaths[name]);
+  icon.append(path);
+  node.prepend(icon);
+  return node;
+}
+
 function button(text, action, className) {
   const node = element('button', text, className);
   node.type = 'button';
@@ -80,19 +102,19 @@ function health(service) {
 
 function classify(service) {
   if (busy.has(service.id)) return [busy.get(service.id), 'attention', 'warn'];
-  if (service.untracked) return ['External listener', 'attention', 'warn'];
+  if (service.untracked) return ['External listener', 'attention', 'external'];
   if (service.state === 'stopped') {
     return [service.enabled ? 'Stopped' : 'Disabled', 'stopped', ''];
   }
   if (service.state === 'running') {
     if (['unhealthy', 'timeout', 'connection_failed', 'not_http'].includes(service.health_status) && !service.sensitive) {
-      return ['Unhealthy', 'attention', 'warn'];
+      return ['Unhealthy', 'attention', service.health_status === 'timeout' ? 'warn' : 'bad'];
     }
     if (service.diagnostic) return ['Needs attention', 'attention', 'warn'];
     return [service.health_status === 'healthy' ? 'Healthy' : 'Running', 'running', 'good'];
   }
   const labels = {starting: 'Starting', stopping: 'Stopping', failed: 'Failed', unknown: 'Unknown'};
-  return [labels[service.state] || 'Unknown', 'attention', 'warn'];
+  return [labels[service.state] || 'Unknown', 'attention', service.state === 'failed' ? 'bad' : 'warn'];
 }
 
 function switchView(next) {
@@ -117,6 +139,9 @@ function render() {
   const selectedStatus = $('status').value;
   for (const metric of document.querySelectorAll('[data-status]')) {
     metric.setAttribute('aria-pressed', String(metric.dataset.status === selectedStatus));
+    const track = metric.querySelector('progress');
+    track.max = Math.max(1, registered.length);
+    track.value = totals[metric.dataset.status];
   }
   const groups = [...new Set(registered.map(service => service.group))].sort();
   if (groups.join('\0') !== [...$('group').options].slice(1).map(option => option.value).join('\0')) {
@@ -176,7 +201,7 @@ function serviceRow(service) {
   }
   name.append(details, element('p', service.description || (service.group === 'Ungrouped' ? '' : service.group)));
   const [label, , style] = classify(service);
-  const state = element('div', null, 'status');
+  const state = element('div', null, `status ${style}`);
   state.append(element('span', null, `dot ${style}`), document.createTextNode(label));
   if (!busy.has(service.id) && health(service) && service.state === 'running') state.append(element('small', health(service)));
   const port = element('span', service.port ? `:${service.port}` : '—', 'port');
@@ -186,13 +211,15 @@ function serviceRow(service) {
     if (open) {
       open.dataset.focus = `${service.id}-open`;
       open.setAttribute('aria-label', `Open ${service.name}`);
-      actions.append(open);
+      actions.append(addIcon(open, 'open'));
     }
   }
   if (service.actions.start || service.actions.stop) {
     const action = service.actions.stop ? 'stop' : 'start';
     const label = action === 'stop' ? 'Stop' : service.state === 'failed' ? 'Retry' : 'Start';
-    const primary = button(label, () => lifecycle(service, action), action === 'start' ? 'primary' : '');
+    const color = label === 'Retry' ? 'retry' : action;
+    const primary = addIcon(button(label, () => lifecycle(service, action), `action-${color}`),
+      color === 'retry' ? 'restart' : action);
     primary.dataset.focus = `${service.id}-primary`;
     primary.disabled = busy.has(service.id) || (action === 'stop' && service.state === 'stopping');
     primary.setAttribute('aria-label', `${label} ${service.name}`);
@@ -344,8 +371,8 @@ async function serviceDetails(service) {
     details.append(recent);
   }
   const controls = element('div', null, 'dialog-actions');
-  if (service.actions.restart) controls.append(button('Restart', () => { dialog.close(); lifecycle(service, 'restart'); }));
-  if (service.actions.force_stop) controls.append(button('Force Stop', () => { dialog.close(); lifecycle(service, 'force'); }, 'error'));
+  if (service.actions.restart) controls.append(addIcon(button('Restart', () => { dialog.close(); lifecycle(service, 'restart'); }, 'action-restart'), 'restart'));
+  if (service.actions.force_stop) controls.append(addIcon(button('Force Stop', () => { dialog.close(); lifecycle(service, 'force'); }, 'error'), 'force'));
   try {
     const result = await request('/api/registry');
     if (!details.isConnected) return;
@@ -366,7 +393,7 @@ async function serviceDetails(service) {
   } catch (error) { details.append(element('p', error.message, 'error')); }
   if (!details.isConnected) return;
   const logs = element('details');
-  logs.append(element('summary', 'Recent logs'), log, button('Refresh logs', loadLogs));
+  logs.append(element('summary', 'Recent logs'), log, addIcon(button('Refresh logs', loadLogs, 'action-logs'), 'logs'));
   logs.addEventListener('toggle', () => { if (logs.open) loadLogs(); });
   details.append(logs, controls);
 }

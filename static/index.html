@@ -12,19 +12,19 @@
 <body>
   <header class="masthead">
     <div class="shell header-inner">
-      <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span> YARD</div>
+      <div class="brand"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h18M5 12V7l7-4 7 4v5M7 12v8m10-8v8m-7 0v-5h4v5"/></svg> Yard</div>
       <span class="machine"><span class="machine-dot"></span> Local Machine</span>
     </div>
   </header>
   <main class="shell">
     <div class="intro">
       <div><h1>Your localhost control center</h1><p>Start, stop, and inspect your local applications.</p></div>
-      <button class="primary" id="add"><span aria-hidden="true">＋</span> Add Service</button>
+      <button class="primary" id="add"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M8 12h8m-4-4v8"/></svg> Add Service</button>
     </div>
     <section class="metrics" aria-label="Registered service totals">
-      <button data-status="running"><span class="dot good"></span><span>Running</span><strong id="running">—</strong></button>
-      <button data-status="stopped"><span class="dot"></span><span>Stopped</span><strong id="stopped">—</strong></button>
-      <button data-status="attention"><span class="dot warn"></span><span>Attention</span><strong id="attention">—</strong></button>
+      <button data-status="running"><span class="dot good"></span><span>Running</span><strong id="running">—</strong><progress class="dither-track" value="0" max="1" aria-hidden="true"></progress></button>
+      <button data-status="stopped"><span class="dot"></span><span>Stopped</span><strong id="stopped">—</strong><progress class="dither-track" value="0" max="1" aria-hidden="true"></progress></button>
+      <button data-status="attention"><span class="dot warn"></span><span>Attention</span><strong id="attention">—</strong><progress class="dither-track" value="0" max="1" aria-hidden="true"></progress></button>
     </section>
     <div class="section-bar">
       <nav aria-label="Yard views">
@@ -32,7 +32,7 @@
         <button id="discovery-tab">Discovery <span id="discovery-count"></span></button>
       </nav>
       <div class="toolbar">
-        <button id="refresh" title="Refresh service status">↻ Refresh</button>
+        <button id="refresh" title="Refresh service status"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8m0-5v5h-5m5 4a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16m5 0H3v5"/></svg> Refresh</button>
         <button id="registry">Registry</button>
       </div>
     </div>
