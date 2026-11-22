@@ -33,6 +33,10 @@ if [[ $# -ne 0 && !( $# -eq 1 && "$1" == open ) ]]; then
   exec "$kujo_bin" run "$project/yard.kujo" "$@"
 fi
 
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "yard: Python 3 is required to launch the dashboard." >&2
+  exit 127
+fi
 port="${YARD_PORT:-9753}"
 if [[ ! "$port" =~ ^[0-9]{1,5}$ ]] || (( 10#$port < 1 || 10#$port > 65535 )); then
   echo "yard: YARD_PORT must be a port from 1 to 65535." >&2
@@ -41,7 +45,7 @@ fi
 port="$((10#$port))"
 url="http://127.0.0.1:$port"
 identity() {
-  curl -q --noproxy '*' -fsS --max-time 0.5 "$url/api/identity" 2>/dev/null
+  curl -q --noproxy '*' -fsS --max-time 0.5 --max-filesize 8192 "$url/api/identity" 2>/dev/null
 }
 instance="$(identity || true)"
 if [[ -z "$instance" ]]; then
@@ -51,7 +55,7 @@ if [[ -z "$instance" ]]; then
     echo "yard: dashboard state or log is a symbolic link." >&2
     exit 1
   fi
-  nohup "$kujo_bin" run "$project/yard.kujo" serve "$port" </dev/null >"$YARD_DIR/dashboard.log" 2>&1 &
+  python3 "$YARD_SUPERVISOR" dashboard "$kujo_bin" "$project/yard.kujo" "$port" "$YARD_DIR/dashboard.log"
   for ((attempt=0; attempt<35; attempt++)); do
     instance="$(identity || true)"
     [[ -z "$instance" ]] || break
@@ -63,7 +67,12 @@ if [[ -z "$instance" ]]; then
   exit 1
 fi
 if ! python3 -c 'import json, os, sys
-data = json.load(sys.stdin)
+try:
+    data = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+if not isinstance(data, dict):
+    sys.exit(1)
 sys.exit(not (data.get("app") == "yard" and data.get("version") == "2.0"
     and data.get("config") == os.environ["YARD_CONFIG"] and data.get("state") == os.environ["YARD_DIR"]))' <<< "$instance"; then
   echo "yard: $url is serving a different instance. Choose another YARD_PORT or use its registry and state paths." >&2

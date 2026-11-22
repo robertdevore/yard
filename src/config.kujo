@@ -1,15 +1,9 @@
-# Yard :: config
-#
-# Loads and validates the managed-services config: a local JSON file describing
-# the dev servers Yard is allowed to start, stop, and restart. The config is the
-# *only* source of commands Yard will ever run on your behalf — there is no way
-# to inject an arbitrary command through the API or UI. A missing config is
-# fine (you just get a read-only view of detected ports); an invalid config is
-# surfaced as an error rather than crashed on.
+# Parse the local registry and normalize validated fields. The lifecycle
+# controller runs only commands that have been saved in this registry.
 
 from src.util import truthy, includes, expand_home
 
-# Resolve the config path: explicit arg > $YARD_CONFIG > ./yard.config.json.
+# Resolve the config path from the CLI override, environment, or user config.
 export func resolve_path(explicit) {
     if type(explicit) != "null" && "${explicit}" != "" {
         return expand_home("${explicit}")
@@ -21,7 +15,7 @@ export func resolve_path(explicit) {
 #   { "path": str, "exists": bool, "services": [ServiceConfig...],
 #     "errors": [str...], "warnings": [str...] }
 # `services` only ever contains entries that passed validation, so callers can
-# trust id/name/port to be present.
+# trust validated IDs and normalized fields.
 export func load(path) {
     result := {
         "path": path,
@@ -108,8 +102,8 @@ export func validate_services(raw_services) {
     mut services := []
     mut errors := []
     mut warnings := []
-    mut seen_ids := []
-    mut seen_ports := []
+    mut seen_ids := {}
+    mut seen_ports := {}
     mut i := 0
     n := len(raw_services)
     while i < n {
@@ -140,16 +134,18 @@ export func validate_services(raw_services) {
             errors = push(errors, "Service '${id}': ${problem}")
             continue
         }
-        if includes(seen_ids, id) {
+        if has_key(seen_ids, id) == 1 {
             warnings = push(warnings, "duplicate service id '${id}' (later entry ignored)")
             continue
         }
-        if port != null && includes(seen_ports, port) {
+        if port != null && has_key(seen_ports, "${port}") == 1 {
             warnings = push(warnings, "duplicate configured port ${port} (service '${id}' ignored)")
             continue
         }
-        seen_ids = push(seen_ids, id)
-        seen_ports = push(seen_ports, port)
+        seen_ids[id] := true
+        if port != null {
+            seen_ports["${port}"] := true
+        }
         services = push(services, normalize_service(entry, id, port))
     }
     return {"services": services, "errors": errors, "warnings": warnings}

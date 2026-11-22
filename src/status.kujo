@@ -4,14 +4,17 @@ from src.knownports import known_label, is_sensitive, infer_kind, sensitive_list
 from src.state import load_display_state, get_entry
 from src.supervisor import supervisor
 from src.health import probe_target, probe_result, batch_health, passive_health, skipped
-from src.config import service_for_port
 
 export func build_services(config, do_health, server_port) {
     scan_result := scan()
     loaded := load_display_state()
     state := loaded["state"]
     mut specs := {}
+    mut configured_ports := {}
     for svc in config["services"] {
+        if svc["port"] != null {
+            configured_ports["${svc["port"]}"] := svc
+        }
         spec := get(get_entry(state, svc["id"]), "supervisor")
         if type(spec) == "dict" {
             specs[svc["id"]] := spec
@@ -24,7 +27,7 @@ export func build_services(config, do_health, server_port) {
     for listener in scan_result["listeners"] {
         process := get(processes, "${listener["pid"]}")
         group := get(process, "group")
-        svc := service_for_port(config["services"], listener["port"])
+        svc := get(configured_ports, "${listener["port"]}")
         if group != null && sensitive_listener(listener, svc, get(process, "executable")) {
             sensitive_groups["${group}"] := true
         }
@@ -75,7 +78,7 @@ export func build_services(config, do_health, server_port) {
         output = push(output, status)
     }
     for listener in scan_result["processes"] {
-        if service_for_port(config["services"], listener["port"]) == null {
+        if get(configured_ports, "${listener["port"]}") == null {
             output = push(output, unidentified(listener, processes, sensitive_groups))
         }
     }

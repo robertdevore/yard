@@ -371,6 +371,18 @@ func cmd_doctor(tokens) {
     for listener in scan["processes"] {
         if listener["port"] == port {
             port_state = "listening (pid ${listener["pid"]})"
+            break
+        }
+    }
+    if port_state != "available" {
+        identity := execute_status("curl -q --noproxy '*' -fsS --max-time 0.5 http://127.0.0.1:${port}/api/identity", {"max_output_bytes": 8192})
+        matching := false
+        try {
+            reply := parse_json(identity.stdout)
+            matching = get(reply, "app") == "yard" && get(reply, "config") == cfg["path"] && get(reply, "state") == state_dir()
+        } except e {}
+        if matching == false {
+            issues = push(issues, "Dashboard port is occupied by another instance or application")
         }
     }
     if type(port) != "int" || port < 1 || port > 65535 {

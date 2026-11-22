@@ -92,8 +92,14 @@ func control_locked(svc, services, action, force, confirm, target) {
         if get(table, "${owned["pid"]}") != owned["pid"] {
             return failure("Could not verify the running process group")
         }
+        for key in keys(table) {
+            if table[key] == owned["pid"] && is_sensitive(null, full_command(parse_int(key))) {
+                sensitive = true
+                break
+            }
+        }
         for listener in listeners {
-            if get(table, "${listener["pid"]}") == owned["pid"] {
+            if sensitive == false && get(table, "${listener["pid"]}") == owned["pid"] {
                 current := service_for_port(services, listener["port"])
                 if sensitive_listener(listener, current, full_command(listener["pid"])) {
                     sensitive = true

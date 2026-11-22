@@ -1,16 +1,5 @@
-# Yard :: api
-#
-# The JSON brains behind the HTTP routes. Every function here is pure-ish: it
-# reads fresh state (config, scan, health) and returns a plain dict that the
-# serve layer hands to json_response. Keeping the HTTP wiring out of this module
-# means the same logic is exercised directly by the test harness.
-#
-# Safety enforced here:
-#   * destructive actions require the action token (checked in serve)
-#   * force-stop always requires explicit confirmation
-#   * stopping a sensitive service requires explicit confirmation
-#   * restart only works for managed services with a start command
-#   * unknown processes can be stopped, never restarted/started
+# Build response payloads for the transport and CLI. Process ownership is
+# enforced by the lifecycle controller. Listener inspection is read-only.
 
 from src.util import truthy, iso_now
 from src.config import load, resolve_path, service_by_id

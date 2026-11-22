@@ -1,19 +1,13 @@
-# Yard :: state
-#
-# File-backed bookkeeping for services Yard has started. We remember the PID we
-# spawned, when we started it, how many times we've restarted it, and where its
-# logs live. This is the only mutable state Yard keeps, and it lives on disk
-# (default ./.yard) so it survives the dashboard process restarting. Logs for
-# managed services are captured to ./.yard/logs/<id>.log.
+# Durable supervisor ownership, launch diagnostics, and bounded log reads.
 
-from src.util import truthy, iso_now, shell_quote
+from src.util import truthy, shell_quote
 
-# Root state directory: $YARD_DIR or ./.yard in the working directory.
+# Root state directory, with support for explicit legacy locations.
 export func state_dir() {
     return env_or("YARD_DIR", join_path(env_or("HOME", "."), ".config/yard/state"))
 }
 
-export func logs_dir() {
+func logs_dir() {
     return join_path(state_dir(), "logs")
 }
 
@@ -21,8 +15,8 @@ func state_path() {
     return join_path(state_dir(), "managed.json")
 }
 
-# Per-service log file (one rolling file per managed service id).
-export func log_path(id) {
+# Compatibility path for logs captured by Yard 1.x.
+func log_path(id) {
     return join_path(logs_dir(), "${id}.log")
 }
 

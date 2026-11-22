@@ -30,7 +30,3 @@ export func groups() {
     }
     return {}
 }
-
-export func group_live(table, pid) {
-    return type(pid) == "int" && get(table, "${pid}") == pid
-}

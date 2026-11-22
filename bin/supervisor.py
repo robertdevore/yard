@@ -31,8 +31,9 @@ def private_directory(path):
         raise ValueError("Yard control directory must be owned by this user with mode 0700")
 
 
-def open_log(path):
-    private_directory(path.parent)
+def open_log(path, require_private=True):
+    if require_private:
+        private_directory(path.parent)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     info = os.fstat(fd)
     if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid():
@@ -105,7 +106,7 @@ def supervise(spec):
             while child.poll() is None or members(group):
                 try:
                     client, _ = server.accept()
-                except TimeoutError:
+                except socket.timeout:
                     continue
                 with client:
                     client.settimeout(0.25)
@@ -328,6 +329,15 @@ def diagnostics(action, spec):
 
 
 def main():
+    if sys.argv[1] == "dashboard":
+        kujo, script, port, path = sys.argv[2:]
+        with open_log(Path(path), require_private=False) as log:
+            subprocess.Popen(
+                [kujo, "run", script, "serve", port],
+                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        return
     action, raw = sys.argv[1:]
     spec = json.loads(raw)
     if action in ("groups", "snapshot", "health", "discover", "inspect"):
