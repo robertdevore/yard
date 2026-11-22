@@ -243,6 +243,13 @@ async function refresh() {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json();
       current = data.services;
+      const registered = new Set(current.filter(item => item.managed).map(item => item.id));
+      // Keep history for stopped services, and release it when a service is removed.
+      if (!data.config.errors.length) {
+        for (const id of history.keys()) {
+          if (!registered.has(id)) history.delete(id);
+        }
+      }
       for (const service of current.filter(item => item.managed && item.state === 'running')) {
         const label = health(service);
         const samples = history.get(service.id) || [];
@@ -263,6 +270,12 @@ async function refresh() {
     }
   })();
   return loading;
+}
+
+async function refreshAfterMutation() {
+  // An in-flight response may describe the state before the write completed.
+  if (loading) await loading;
+  await refresh();
 }
 
 function confirmAction(title, text, label) {
@@ -300,7 +313,7 @@ async function lifecycle(service, action, confirmed = false) {
     notice(`${service.name} · ${error.message}`, true);
   } finally {
     busy.delete(service.id);
-    await refresh();
+    await refreshAfterMutation();
   }
   if (confirmation && await confirmAction('Confirm action', confirmation, 'Confirm')) {
     const latest = current.find(item => item.id === service.id);
@@ -386,7 +399,7 @@ async function serviceDetails(service) {
         try {
           await request('/api/registry', {operation: 'remove', id: service.id});
           notice(`Removed ${service.name}`);
-          await refresh();
+          await refreshAfterMutation();
         } catch (error) { notice(error.message, true); }
       }));
     }
@@ -452,7 +465,7 @@ function editor(initial = {}, editing = false, hint = '') {
       dialog.close();
       notice(`Saved ${config.name}`);
       switchView('services');
-      await refresh();
+      await refreshAfterMutation();
     } catch (failure) {
       error.textContent = failure.message;
       error.hidden = false;
@@ -547,7 +560,7 @@ async function manageRegistry() {
         if (operation === 'import' && !review.checked) throw new Error('Review the imported startup commands first.');
         await request('/api/registry', {operation, registry: JSON.parse(field.value)});
         message.textContent = operation === 'validate' ? 'Registry JSON is valid.' : 'Services imported.';
-        if (operation === 'import') await refresh();
+        if (operation === 'import') await refreshAfterMutation();
       } catch (error) { message.textContent = error.message; }
     }));
   }

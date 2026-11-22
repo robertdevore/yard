@@ -9,3 +9,4 @@
 
 # Python test and supervisor bytecode.
 __pycache__/
+yard.config.json.lock

@@ -5,7 +5,8 @@ from src.util import truthy, iso_now
 from src.config import load, resolve_path, service_by_id
 from src.ports import scan, valid_pid
 from src.process import control_service, control_listeners
-from src.state import read_logs
+from src.state import read_logs, load_control_state, get_entry
+from src.supervisor import absolute_path
 from src.status import build_services, summarize
 
 # Load the active config from the conventional location each call so edits to
@@ -55,32 +56,33 @@ export func service_action(id, action, force, confirm) {
 }
 
 export func service_action_target(id, action, force, confirm, target) {
-    services := load_cfg()["services"]
-    svc := service_by_id(services, id)
-    if type(svc) != "dict" {
-        return err("no such managed service: '${id}'")
-    }
-    return action_result(control_service(svc, action, force, confirm, target), action, id)
+    return action_result(control_service(id, action, force, confirm, target), action, id)
 }
 
 export func stop_process_action(pid, force, confirm) {
     if valid_pid(pid) == false {
         return err("invalid pid")
     }
-    res := control_listeners(load_cfg()["services"], null, pid, force, confirm)
+    res := control_listeners()
     return action_result(res, "stop-process", "${pid}")
 }
 
 export func stop_port_action(port, force, confirm) {
-    return control_listeners(load_cfg()["services"], port, null, force, confirm)
+    return control_listeners()
 }
 
 export func logs_payload(id, max_lines) {
-    svc := service_by_id(load_cfg()["services"], id)
+    cfg := load_cfg()
+    svc := service_by_id(cfg["services"], id)
     if type(svc) != "dict" {
         return err("no such managed service: '${id}'")
     }
     try {
+        entry := get_entry(load_control_state(), id)
+        bound := get(entry, "registry_path")
+        if bound != null && bound != absolute_path(cfg["path"]) {
+            return err("This service ID is tracked by another registry in the shared state directory.")
+        }
         log := read_logs(id, max_lines)
         return {"ok": true, "id": id, "lines": log["lines"], "truncated": log["truncated"]}
     } except e {

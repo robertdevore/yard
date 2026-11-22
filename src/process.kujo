@@ -4,10 +4,10 @@ from src.ports import scan_listeners, full_command
 from src.state import state_dir, load_control_state, save_state, get_entry, ensure_dirs
 from src.config import load, resolve_path, service_by_id, service_for_port
 from src.knownports import is_sensitive, sensitive_listener
-from src.supervisor import supervisor, absolute_path, groups
+from src.supervisor import supervisor, absolute_path
 from src.health import service_health
 
-export func control_service(svc, action, force, confirm, target) {
+export func control_service(id, action, force, confirm, target) {
     mut lock := null
     try {
         ensure_dirs()
@@ -18,35 +18,50 @@ export func control_service(svc, action, force, confirm, target) {
     mut result := null
     try {
         config := load(resolve_path(null))
-        current := service_by_id(config["services"], svc["id"])
-        if len(config["errors"]) > 0 || type(current) != "dict" {
-            result = failure("registry is invalid or the service was removed; review the configuration")
+        current := service_by_id(config["services"], id)
+        if len(config["errors"]) > 0 {
+            result = failure("registry is invalid; review the configuration")
+        } else if type(current) != "dict" {
+            result = failure("no such managed service: '${id}'")
         } else {
-            result = control_locked(current, config["services"], action, force, confirm, target)
+            result = control_locked(current, config["services"], config["path"], action, force, confirm, target)
         }
     } except e {
-        result = failure("could not ${action} '${svc["id"]}': ${e}")
+        result = failure("could not ${action} '${id}': ${e}")
     }
     file_unlock(lock)
     return result
 }
 
-func control_locked(svc, services, action, force, confirm, target) {
+func control_locked(svc, services, registry_path, action, force, confirm, target) {
     id := svc["id"]
     port := svc["port"]
     state := load_control_state()
     entry := get_entry(state, id)
     spec := get(entry, "supervisor")
     owned := null
+    bound := get(entry, "registry_path")
+    if bound != null && bound != absolute_path(registry_path) {
+        return failure("This service ID is supervised by another registry. Use that registry or a separate state directory.")
+    }
     if type(spec) == "dict" {
         r := supervisor("status", spec, 1300)
         if r["ok"] == false {
             return r
         }
         owned = r["receipt"]
+        if owned != null {
+            if bound == null && (get(spec, "port") != port || get(spec, "start") != svc["start"] || get(spec, "cwd") != absolute_path(svc["cwd"])) {
+                return failure("The legacy launch record differs from this definition. Restore its original startup command, directory and port before controlling it.")
+            }
+        }
         old_group := get(entry, "pid")
         if owned == null && type(old_group) == "int" && get(entry, "outcome") != "stopped" {
-            table := groups()
+            census := supervisor("groups", {}, 1500)
+            if census["ok"] == false {
+                return failure("Could not verify whether the prior process group still exists: ${census["error"]}")
+            }
+            table := census["receipt"]
             for key in keys(table) {
                 if table[key] == old_group {
                     return failure("The prior process group may still exist, but its supervisor is unavailable. Inspect it from its original launcher.")
@@ -87,8 +102,12 @@ func control_locked(svc, services, action, force, confirm, target) {
         return {"ok": true, "error": null, "signal": "none", "note": "Service is already stopped"}
     }
     if owned != null {
-        sensitive := truthy(svc["sensitive"]) || is_sensitive(port, svc["start"])
-        table := groups()
+        sensitive := truthy(svc["sensitive"]) || truthy(get(entry, "sensitive")) || is_sensitive(port, svc["start"]) || is_sensitive(get(spec, "port"), get(spec, "start"))
+        census := supervisor("groups", {}, 1500)
+        if census["ok"] == false {
+            return failure("Could not verify the running process group: ${census["error"]}")
+        }
+        table := census["receipt"]
         if get(table, "${owned["pid"]}") != owned["pid"] {
             return failure("Could not verify the running process group")
         }
@@ -142,10 +161,10 @@ func control_locked(svc, services, action, force, confirm, target) {
             return {"ok": true, "error": null, "signal": signal}
         }
     }
-    return launch(svc, state, entry, action == "restart")
+    return launch(svc, state, entry, registry_path, action == "restart")
 }
 
-func launch(svc, state, previous, restarting) {
+func launch(svc, state, previous, registry_path, restarting) {
     id := svc["id"]
     count := get(previous, "restart_count")
     if type(count) != "int" {
@@ -164,7 +183,12 @@ func launch(svc, state, previous, restarting) {
         "env": svc["env"],
         "shutdown_timeout": svc["shutdown_timeout"]
     }
-    entry := {"supervisor": spec, "started_at": iso_now(), "restart_count": count, "outcome": "starting", "error": null}
+    entry := {
+        "supervisor": {"socket": spec["socket"], "token": spec["token"], "control_dir": spec["control_dir"]},
+        "registry_path": absolute_path(registry_path),
+        "sensitive": (truthy(svc["sensitive"]) || is_sensitive(svc["port"], svc["start"])),
+        "started_at": iso_now(), "restart_count": count, "outcome": "starting", "error": null
+    }
     state[id] := entry
     save_state(state)
     started := supervisor("launch", spec, 2500)
@@ -176,28 +200,45 @@ func launch(svc, state, previous, restarting) {
     entry["child"] := started["receipt"]["child"]
     state[id] := entry
     save_state(state)
-    deadline := current_timestamp() + svc["startup_timeout"] * 1000
+    deadline := performance_now() + svc["startup_timeout"] * 1000
     mut tries := 0
     mut health := "unknown"
-    while current_timestamp() < deadline {
-        live := supervisor("status", spec, 1300)
-        if live["ok"] == false || live["receipt"] == null {
-            return record_failure(state, id, entry, "Startup command exited or ownership could not be verified. Check recent logs.")
+    mut obstacle := null
+    while performance_now() < deadline {
+        live := supervisor("status", entry["supervisor"], 1300)
+        if live["ok"] == false {
+            return record_failure(state, id, entry, "Could not verify the starting service: ${live["error"]}")
         }
+        if live["receipt"] == null {
+            return record_failure(state, id, entry, "Startup command exited. Check recent logs.")
+        }
+        obstacle = get(live["receipt"], "error")
         ready := svc["port"] == null
+        ip_version := null
         if ready == false {
             scan := scan_listeners()
-            table := groups()
-            for listener in scan["processes"] {
-                if listener["port"] == svc["port"] && get(table, "${listener["pid"]}") == pid {
-                    ready = true
+            if scan["ok"] == false {
+                obstacle = scan["error"]
+            } else {
+                census := supervisor("groups", {}, 1500)
+                if census["ok"] == false {
+                    obstacle = census["error"]
+                } else {
+                    table := census["receipt"]
+                    for listener in scan["processes"] {
+                        if listener["port"] == svc["port"] && get(table, "${listener["pid"]}") == pid {
+                            ready = true
+                            ip_version = listener["ip_version"]
+                            break
+                        }
+                    }
                 }
             }
         }
-        if ready {
-            health = service_health(svc, svc["probe_timeout_ms"] / 1000.0)["status"]
+        if ready && obstacle == null && performance_now() < deadline {
+            health = service_health(svc, ip_version)["status"]
             if health == "healthy" || health == "process" || health == "not_checked" {
-                if tries > 0 || svc["port"] != null {
+                if performance_now() < deadline && (tries > 0 || svc["port"] != null) {
                     entry["outcome"] := "running"
                     entry["health"] := health
                     if restarting {
@@ -211,6 +252,9 @@ func launch(svc, state, previous, restarting) {
         }
         tries = tries + 1
         sleep(150)
+    }
+    if obstacle != null {
+        return record_failure(state, id, entry, "Readiness deadline expired: ${obstacle}")
     }
     return record_failure(state, id, entry, "Readiness deadline expired (health: ${health}). Check logs and the configured port or endpoint.")
 }
@@ -233,7 +277,7 @@ func port_listener(listeners, port) {
 }
 
 # Preserve old command/route names as an explicit safe failure.
-export func control_listeners(services, port, requested_pid, force, confirm) {
+export func control_listeners() {
     return failure("External listeners are read-only. Stop the application from its own launcher.")
 }
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """POSIX session supervisor. Only a live session leader can signal its group."""
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeout
+import fcntl
 import hmac
 import json
 import os
@@ -16,6 +17,7 @@ import threading
 import time
 
 LOG_LIMIT = 1024 * 1024
+INPUT_LIMIT = 1024 * 1024
 
 
 def members(group):
@@ -31,17 +33,29 @@ def private_directory(path):
         raise ValueError("Yard control directory must be owned by this user with mode 0700")
 
 
+def private_file(path):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid():
+            raise ValueError(f"Unsafe Yard file: {path.name}")
+        os.fchmod(fd, 0o600)
+        return os.fdopen(fd, "wb", buffering=0)
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def open_log(path, require_private=True):
     if require_private:
         private_directory(path.parent)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-    info = os.fstat(fd)
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.geteuid():
-        os.close(fd)
-        raise ValueError("Unsafe service log path")
-    os.fchmod(fd, 0o600)
-    os.ftruncate(fd, 0)
-    return os.fdopen(fd, "wb", buffering=0)
+    log = private_file(path)
+    try:
+        log.truncate(0)
+    except BaseException:
+        log.close()
+        raise
+    return log
 
 
 def drain(pipe, log, secrets):
@@ -71,7 +85,7 @@ def drain(pipe, log, secrets):
             if log.tell() + len(output) > LOG_LIMIT:
                 log.truncate(0)
                 log.seek(0)
-            log.write(output)
+            log.write(output[-LOG_LIMIT:])
             if not chunk:
                 break
 
@@ -82,9 +96,11 @@ def supervise(spec):
         raise ValueError("Yard supervisor requires its own process group")
     stopping = False
     sock = spec["socket"]
+    bound = False
     try:
         with socket.socket(socket.AF_UNIX) as server:
             server.bind(sock)
+            bound = True
             server.listen(8)
             server.settimeout(0.25)
             signal.signal(signal.SIGTERM, lambda *_: None)
@@ -105,7 +121,16 @@ def supervise(spec):
                 raise
             writer = threading.Thread(target=drain, args=(child.stdout, log, secrets), daemon=True)
             writer.start()
-            while child.poll() is None or members(group):
+            while True:
+                census_error = None
+                if child.poll() is not None:
+                    try:
+                        if not members(group):
+                            break
+                    except (OSError, ValueError, subprocess.SubprocessError):
+                        # A failed census cannot prove every child exited.
+                        # Keep the supervisor and its control socket alive.
+                        census_error = "Could not verify the remaining process group"
                 try:
                     client, _ = server.accept()
                 except socket.timeout:
@@ -121,6 +146,8 @@ def supervise(spec):
                         if action in ("stop", "force"):
                             stopping = True
                         receipt = {"pid": group, "child": child.pid, "stopping": stopping}
+                        if census_error:
+                            receipt["error"] = census_error
                         client.sendall(json.dumps(receipt).encode())
                     except (OSError, ValueError, KeyError, TypeError):
                         continue
@@ -130,7 +157,8 @@ def supervise(spec):
                         os.killpg(group, signal.SIGKILL if action == "force" else signal.SIGTERM)
             writer.join(timeout=0.5)
     finally:
-        Path(sock).unlink(missing_ok=True)
+        if bound:
+            Path(sock).unlink(missing_ok=True)
 
 
 def request(spec, action):
@@ -174,10 +202,12 @@ def command(action, spec):
                 except OSError as error:
                     raise ValueError(f"Port {spec['port']} is unavailable: {error.strerror}") from error
         proc = subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), "supervise", json.dumps(spec)],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            [sys.executable, str(Path(__file__).resolve()), "supervise"],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
+        with proc.stdin:
+            proc.stdin.write(json.dumps(spec).encode())
         for _ in range(40):
             if proc.poll() is not None:
                 raise ValueError("Startup command exited immediately. Check the service log.")
@@ -203,8 +233,9 @@ def probe(spec):
     started = time.monotonic()
     timeout = spec["timeout"]
     if spec["kind"] == "tcp":
+        host = "::1" if spec.get("ip_version") == "IPv6" else "127.0.0.1"
         try:
-            with socket.create_connection(("127.0.0.1", spec["port"]), timeout=timeout):
+            with socket.create_connection((host, spec["port"]), timeout=timeout):
                 return {"status": "healthy", "response_ms": round((time.monotonic() - started) * 1000)}
         except socket.timeout:
             return {"status": "timeout"}
@@ -314,15 +345,26 @@ def diagnostics(action, spec):
                 pid, group, parent, _, executable = fields
                 processes[pid] = {"group": int(group), "parent": int(parent), "executable": executable}
         owned = {}
+        errors = {}
+        relevant = {str(pid) for pid in spec["listeners"]}
         for key, service in spec["entries"].items():
             try:
                 os.chdir(service["control_dir"])
                 receipt = request(service, "status")
-                if receipt and str(receipt["pid"]) in processes:
+                if receipt:
+                    pid = str(receipt["pid"])
+                    child = str(receipt["child"])
+                    process = processes.get(pid)
+                    if not process or process["group"] != receipt["pid"]:
+                        errors[key] = "Process group changed during inspection"
+                        continue
                     owned[key] = receipt
-            except (OSError, ValueError):
-                pass
-        return {"processes": processes, "owned": owned}
+                    if child in processes and processes[child]["group"] == receipt["pid"]:
+                        relevant.add(child)
+            except (OSError, ValueError, KeyError, TypeError):
+                errors[key] = "Could not verify the service supervisor"
+        return {"processes": {pid: processes[pid] for pid in relevant if pid in processes},
+                "owned": owned, "errors": errors}
     if action == "groups":
         output = subprocess.check_output(["ps", "-axo", "pid=,pgid=,stat="], text=True, timeout=1)
         return {pid: int(group) for pid, group, state in map(str.split, output.splitlines())
@@ -330,17 +372,42 @@ def diagnostics(action, spec):
     raise ValueError("Unknown supervisor operation")
 
 
-def main():
-    if sys.argv[1] == "dashboard":
-        kujo, script, port, path = sys.argv[2:]
-        with open_log(Path(path), require_private=False) as log:
-            subprocess.Popen(
+def dashboard(kujo, script, port, log_path):
+    port_number = int(port)
+    path = Path(log_path)
+
+    def listening():
+        with socket.socket() as sock:
+            sock.settimeout(0.1)
+            return sock.connect_ex(("127.0.0.1", port_number)) == 0
+
+    # Serialize launch attempts for this state directory. A waiter rechecks the
+    # listener while holding the lock and leaves the winner's log untouched.
+    with private_file(path.with_name(f"dashboard-{port_number}.lock")) as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if listening():
+            return
+        with open_log(path, require_private=False) as log:
+            proc = subprocess.Popen(
                 [kujo, "run", script, "serve", port],
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+        deadline = time.monotonic() + 3
+        while proc.poll() is None and time.monotonic() < deadline:
+            if listening():
+                return
+            time.sleep(0.05)
+
+
+def main():
+    if sys.argv[1] == "dashboard":
+        dashboard(*sys.argv[2:])
         return
-    action, raw = sys.argv[1:]
+    action, = sys.argv[1:]
+    raw = sys.stdin.buffer.read(INPUT_LIMIT + 1)
+    if len(raw) > INPUT_LIMIT:
+        raise ValueError("Yard supervisor input exceeds 1 MiB")
     spec = json.loads(raw)
     if action in ("groups", "snapshot", "health", "discover", "inspect"):
         print(json.dumps({"ok": True, "receipt": diagnostics(action, spec)}))

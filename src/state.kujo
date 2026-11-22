@@ -58,7 +58,9 @@ export func load_control_state() {
 }
 
 export func save_state(state) {
-    return write_file_atomic(state_path(), to_json_pretty(state), true)
+    if write_file_atomic(state_path(), to_json_pretty(state), true) != true {
+        throw("could not persist managed state")
+    }
 }
 
 export func get_entry(state, id) {

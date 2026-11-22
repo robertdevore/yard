@@ -2,8 +2,9 @@
 
 The registry is JSON. The format accepts an object with a `services` array or
 a legacy top-level array. Edits keep the original shape, unrecognized fields,
-and top-level metadata. The UI shares an advisory lock with lifecycle actions
-and replaces the registry atomically. A corrupt file is displayed as an error
+and top-level metadata. Yard shares an advisory state lock with lifecycle
+actions, serializes writes through a lock beside the registry, and replaces the
+registry atomically. A corrupt file is displayed as an error
 and preserved for correction or restoration. An interrupted write leaves the
 previous registry in place. Duplicate IDs or ports are flagged, and older
 registries retain the first matching row until corrected.
@@ -17,12 +18,17 @@ invoke Yard. A service's relative `cwd` is evaluated against the registry
 directory. `YARD_PORT` changes the dashboard port, with an explicit
 `yard serve PORT` taking precedence.
 
-Use the same config and state paths in the CLI and browser. An existing
+Use the same config and state paths in the CLI and browser. Give each separate
+registry its own state directory. New ownership records bind their service ID
+to the absolute registry path used at launch, so a second registry cannot
+control that ID through the same state directory. An existing
 `./yard.config.json` can stay where it is if you pass `--config`. Copy it to the
 default location to migrate, adjusting relative working directories to match
 the new location. Old restart records and logs are readable. Yard 2.0 requires
 a live supervisor for actions and cannot inherit ownership from old PID-only
-records.
+records. For earlier Yard 2.0 supervisor records, restore the original
+startup command, working directory, and port before stopping a service if those
+fields have changed. Stop managed services before moving their registry or state.
 
 ## Fields
 

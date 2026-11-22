@@ -2,6 +2,7 @@
 import argparse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import signal
+import socket
 import time
 
 
@@ -22,9 +23,14 @@ if __name__ == "__main__":
     parser.add_argument("port", type=int)
     parser.add_argument("--delay", type=float, default=0)
     parser.add_argument("--ignore-term", action="store_true")
+    parser.add_argument("--ipv6", action="store_true")
     settings = parser.parse_args()
     if settings.ignore_term:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
     time.sleep(settings.delay)
     print("Fixture ready", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", settings.port), Handler).serve_forever()
+    host = "127.0.0.1"
+    if settings.ipv6:
+        ThreadingHTTPServer.address_family = socket.AF_INET6
+        host = "::1"
+    ThreadingHTTPServer((host, settings.port), Handler).serve_forever()

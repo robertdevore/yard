@@ -68,7 +68,14 @@ class YardFixture:
                 [YARD, "serve", str(self.port)], cwd=self.path, env=self.env,
                 stdout=log, stderr=log,
             )
-        eventually(lambda: self.http("/api/identity")[0] == 200)
+        def ready():
+            if self.server.poll() is not None:
+                diagnostics = self.path.joinpath("dashboard.log").read_text()
+                raise AssertionError(f"Yard dashboard exited ({self.server.returncode})\n{diagnostics}")
+            code, identity = self.http("/api/identity")
+            return code == 200 and identity.get("config") == str(self.registry)
+
+        eventually(ready)
         self.token = re.search(r'name="yard-token" content="([^"]+)"', self.http("/", raw=True)[1])[1]
 
     def stop_yard(self):

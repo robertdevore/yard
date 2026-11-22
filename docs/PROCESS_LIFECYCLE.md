@@ -46,3 +46,12 @@ starts a separate process group or session can escape supervision. Use a foregro
 frameworks and daemons. A registered service can run after a browser tab
 closes or the dashboard server stops. Existing processes and registry
 definitions remain visible when Yard starts again.
+
+The Kujo process and helper exchange bounded JSON over standard input and
+output. New state records keep the private credentials and original
+sensitivity classification needed for later control. The launcher passes the
+full launch configuration only to the supervisor that starts the service.
+A failed process census keeps the supervisor available for authorized
+recovery and leaves the dashboard status uncertain. Readiness uses a
+monotonic elapsed-time budget and requires a complete listener scan for
+port-based services.

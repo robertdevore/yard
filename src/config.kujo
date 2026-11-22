@@ -70,8 +70,8 @@ export func load(path) {
         services = push(services, service)
     }
     result["services"] := services
-    result["errors"] := concat_lists(result["errors"], validated["errors"])
-    result["warnings"] := concat_lists(result["warnings"], validated["warnings"])
+    result["errors"] := validated["errors"]
+    result["warnings"] := validated["warnings"]
     return result
 }
 
@@ -84,17 +84,6 @@ export func extract_services(parsed) {
         return parsed["services"]
     }
     return []
-}
-
-func concat_lists(a, b) {
-    mut out := a
-    mut cl_i := 0
-    cl_n := len(b)
-    while cl_i < cl_n {
-        out = push(out, b[cl_i])
-        cl_i = cl_i + 1
-    }
-    return out
 }
 
 # Validate the raw service entries, normalizing fields and collecting problems.

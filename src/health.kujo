@@ -62,12 +62,11 @@ export func skipped(reason) {
     return {"status": reason, "http_status": null, "response_ms": null}
 }
 
-export func service_health(svc, timeout_secs) {
-    target := probe_target(svc, parse_int(env_or("YARD_ACTIVE_PORT", env_or("YARD_PORT", "9753"))))
+export func service_health(svc, ip_version) {
+    target := probe_target(svc, parse_int(env_or("YARD_ACTIVE_PORT", env_or("YARD_PORT", "9753"))), ip_version)
     if target == null {
         return passive_health(svc)
     }
-    target["timeout"] := timeout_secs
     answer := batch_health({"service": target})
     return probe_result(get(answer, "service"), svc)
 }
@@ -79,10 +78,10 @@ export func passive_health(svc) {
     return skipped("not_checked")
 }
 
-export func probe_target(svc, server_port) {
+export func probe_target(svc, server_port, ip_version) {
     kind := svc["health_type"]
     if kind == "tcp" && svc["port"] != null && svc["port"] != server_port {
-        return {"kind": "tcp", "port": svc["port"], "timeout": svc["probe_timeout_ms"] / 1000.0}
+        return {"kind": "tcp", "port": svc["port"], "timeout": svc["probe_timeout_ms"] / 1000.0, "ip_version": ip_version}
     }
     target := svc["health"]
     if kind == "http" && local_health_url(target) {

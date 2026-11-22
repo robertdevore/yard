@@ -2,6 +2,7 @@ import concurrent.futures
 import json
 import os
 import signal
+import socket
 from pathlib import Path
 import shutil
 import subprocess
@@ -122,6 +123,66 @@ class YardIntegration(unittest.TestCase):
         self.assertFalse(yard.action("second", "start")["ok"])
         self.assertEqual(state.read_text(), "{interrupted")
 
+    def test_registry_writes_serialize_across_state_directories(self):
+        first = self.yard()
+        second = self.yard()
+        second.registry = first.registry
+        second.env["YARD_CONFIG"] = str(first.registry)
+        first.start_yard()
+        second.start_yard()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            writes = [pool.submit(yard.registry_action, "add",
+                                  service={"id": f"worker-{index}", "port": free_port()})
+                      for index, yard in enumerate((first, second))]
+            for future in writes:
+                self.assertEqual(future.result()[0], 200)
+        saved = first.http("/api/registry")[1]["registry"]["services"]
+        self.assertEqual({service["id"] for service in saved}, {"worker-0", "worker-1"})
+
+    def test_shared_state_keeps_registries_from_controlling_each_other(self):
+        owner = self.yard([{"id": "job", "start": "sleep 30"}])
+        other = self.yard([{"id": "job", "start": "sleep 50"}])
+        other.env["YARD_DIR"] = str(owner.state)
+        owner.start_yard()
+        other.start_yard()
+        started = owner.action("job", "start")
+        self.assertTrue(started["ok"], started)
+        self.assertFalse(other.lookup("job")["owned_by_yard"])
+        log = other.http("/api/services/job/logs")[1]
+        self.assertIn("another registry", log["error"])
+        self.assertIn("another registry", other.action("job", "stop")["error"])
+        self.assertIn("another registry", other.registry_action("remove", id="job")[1]["error"])
+        self.assertTrue(owner.lookup("job")["owned_by_yard"])
+        self.assertTrue(owner.action("job", "stop")["ok"])
+
+    def test_process_census_failure_is_visible(self):
+        yard = self.yard([{"id": "worker", "start": "sleep 30"}])
+        mock = yard.path / "mock"
+        mock.mkdir()
+        ps = mock / "ps"
+        ps.write_text("#!/bin/sh\nexit 1\n")
+        ps.chmod(0o755)
+        original = yard.env["PATH"]
+        yard.env["PATH"] = str(mock) + os.pathsep + original
+        try:
+            yard.start_yard()
+            snapshot = yard.http("/api/services?health=0")[1]
+            self.assertFalse(snapshot["ok"])
+            self.assertIsNotNone(snapshot["state_error"])
+            worker = next(service for service in snapshot["services"] if service["id"] == "worker")
+            self.assertEqual(worker["state"], "unknown")
+            self.assertFalse(worker["actions"]["start"])
+        finally:
+            yard.env["PATH"] = original
+
+    def test_validation_available_when_active_registry_is_damaged(self):
+        yard = self.yard()
+        yard.registry.write_text("{damaged")
+        yard.start_yard()
+        status, result = yard.registry_action("validate", registry={"services": [{"id": "local", "port": 18020}]})
+        self.assertEqual(status, 200, result)
+        self.assertEqual(yard.registry.read_text(), "{damaged")
+
     def test_launch_failures_and_health_diagnostics(self):
         port, slow = free_port(), free_port()
         services = [
@@ -149,6 +210,22 @@ class YardIntegration(unittest.TestCase):
         self.assertTrue(yard.action("worker", "start")["ok"])
         self.assertEqual(yard.lookup("worker")["health_status"], "process")
         eventually(lambda: yard.lookup("worker")["state"] == "failed")
+
+    def test_tcp_readiness_uses_listener_address_family(self):
+        try:
+            with socket.socket(socket.AF_INET6) as fixture:
+                fixture.bind(("::1", 0))
+                port = fixture.getsockname()[1]
+        except OSError as exc:
+            self.skipTest(f"IPv6 loopback is unavailable: {exc}")
+        yard = self.yard([{"id": "ipv6", "port": port, "start": fixture_command(port, "--ipv6")}])
+        yard.start_yard()
+        outcome = yard.action("ipv6", "start")
+        self.assertTrue(outcome["ok"], outcome)
+        status = yard.lookup("ipv6", health=True)
+        self.assertEqual(status["ip_version"], "IPv6")
+        self.assertEqual(status["health_status"], "healthy")
+        self.assertTrue(yard.action("ipv6", "stop")["ok"])
 
     def test_tcp_shutdown_failure_and_confirmation(self):
         port = free_port()
@@ -247,8 +324,11 @@ class YardIntegration(unittest.TestCase):
         self.assertIn(before, yard.http("/", raw=True)[1])
         self.assertEqual(yard.cli("doctor", "--json").returncode, 0)
         yard.stop_yard()
-        launched = yard.cli()
-        self.assertEqual(launched.stdout.strip(), yard.url, launched)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+            launches = list(pool.map(lambda _: yard.cli(), range(3)))
+        for launched in launches:
+            self.assertEqual(launched.returncode, 0, launched)
+            self.assertEqual(launched.stdout.strip(), yard.url, launched)
         self.assertEqual(yard.http("/api/identity")[1]["config"], str(yard.registry))
         self.assertNotIn(before, yard.http("/", raw=True)[1])
         listener = subprocess.check_output(

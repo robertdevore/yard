@@ -3,7 +3,7 @@
 from src.config import load, resolve_path, extract_services, validate_services
 from src.process import failure
 from src.state import ensure_dirs, state_dir, load_control_state, get_entry
-from src.supervisor import supervisor
+from src.supervisor import supervisor, absolute_path
 from src.util import shell_quote
 
 export func registry_payload() {
@@ -15,14 +15,26 @@ export func registry_payload() {
 }
 
 export func registry_action(body) {
+    if get(body, "operation") == "validate" {
+        return strict_validation(get(body, "registry"))
+    }
     mut lock := null
     mut result := null
+    mut registry_lock := null
     try {
         ensure_dirs()
         lock = file_lock(join_path(state_dir(), "managed.lock"), 15000)
+        path := resolve_path(null)
+        if path_is_dir(dirname(path)) == false {
+            throw("Registry parent directory does not exist")
+        }
+        registry_lock = file_lock(path + ".lock", 15000)
         result = registry_locked(body)
     } except e {
         result = failure("Could not update registry: ${e}")
+    }
+    if registry_lock != null {
+        file_unlock(registry_lock)
     }
     if lock != null {
         file_unlock(lock)
@@ -32,13 +44,10 @@ export func registry_action(body) {
 
 func registry_locked(body) {
     path := resolve_path(null)
+    operation := get(body, "operation")
     cfg := load(path)
     if len(cfg["errors"]) > 0 || len(cfg["warnings"]) > 0 {
         return failure("Resolve the existing registry errors or duplicate entries before editing")
-    }
-    operation := get(body, "operation")
-    if operation == "validate" {
-        return strict_validation(get(body, "registry"))
     }
     mut raw := cfg["raw"]
     mut entries := extract_services(raw)
@@ -75,8 +84,17 @@ func registry_locked(body) {
                     if running["ok"] == false {
                         return running
                     }
-                    if running["receipt"] != null && (operation == "remove" || (has_key(entry, "port") == 1 && "${get(entry, "port")}" != "${get(previous, "port")}")) {
-                        return failure("Stop the Yard-owned service before removing it or changing its port")
+                    if running["receipt"] != null {
+                        bound := get(entry_state, "registry_path")
+                        if bound != null && bound != absolute_path(path) {
+                            return failure("This service ID is supervised by another registry. Use a separate state directory.")
+                        }
+                        if operation == "remove" || changed_field(entry, previous, "port") {
+                            return failure("Stop the Yard-owned service before removing it or changing its port")
+                        }
+                        if bound == null && (changed_field(entry, previous, "start") || changed_field(entry, previous, "cwd")) {
+                            return failure("Stop the legacy Yard-owned service before changing its startup command or directory")
+                        }
                     }
                 }
                 if operation == "edit" {
@@ -135,4 +153,8 @@ func strict_validation(raw) {
         return failure(valid["warnings"][0])
     }
     return {"ok": true, "error": null}
+}
+
+func changed_field(update, previous, key) {
+    return has_key(update, key) == 1 && "${get(update, key)}" != "${get(previous, key)}"
 }

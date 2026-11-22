@@ -10,53 +10,46 @@ from src.util import truthy, contains_any_ci
 
 # Human-friendly hint for a recognized port. Keyed by the port as a string so
 # it composes with has_key. Returns null for unrecognized ports.
-func port_map() {
-    return {
-        "80": "HTTP",
-        "443": "HTTPS",
-        "3000": "Node / React / Next.js",
-        "3001": "Node (alt) / React",
-        "3306": "MySQL",
-        "4000": "Phoenix / generic dev",
-        "4173": "Vite preview",
-        "5000": "Flask / macOS AirPlay",
-        "5173": "Vite",
-        "5174": "Vite (alt)",
-        "5432": "Postgres",
-        "5433": "Postgres (alt)",
-        "6379": "Redis",
-        "7000": "macOS Control Center / dev",
-        "7474": "Neo4j browser",
-        "8000": "Python / Django / generic API",
-        "8080": "Generic web server",
-        "8081": "Generic web server (alt)",
-        "8443": "HTTPS (alt)",
-        "8888": "Jupyter / generic",
-        "9000": "PHP-FPM / generic",
-        "9090": "Prometheus",
-        "9200": "Elasticsearch",
-        "9222": "Chrome remote debugging",
-        "9753": "Yard dashboard",
-        "11434": "Ollama",
-        "1234": "LM Studio",
-        "27017": "MongoDB",
-        "2375": "Docker daemon (plain)",
-        "2376": "Docker daemon (TLS)",
-        "5672": "RabbitMQ",
-        "15672": "RabbitMQ management",
-        "8200": "Vault",
-        "3478": "STUN/TURN"
-    }
+PORT_LABELS := {
+    "80": "HTTP",
+    "443": "HTTPS",
+    "3000": "Node / React / Next.js",
+    "3001": "Node (alt) / React",
+    "3306": "MySQL",
+    "4000": "Phoenix / generic dev",
+    "4173": "Vite preview",
+    "5000": "Flask / macOS AirPlay",
+    "5173": "Vite",
+    "5174": "Vite (alt)",
+    "5432": "Postgres",
+    "5433": "Postgres (alt)",
+    "6379": "Redis",
+    "7000": "macOS Control Center / dev",
+    "7474": "Neo4j browser",
+    "8000": "Python / Django / generic API",
+    "8080": "Generic web server",
+    "8081": "Generic web server (alt)",
+    "8443": "HTTPS (alt)",
+    "8888": "Jupyter / generic",
+    "9000": "PHP-FPM / generic",
+    "9090": "Prometheus",
+    "9200": "Elasticsearch",
+    "9222": "Chrome remote debugging",
+    "9753": "Yard dashboard",
+    "11434": "Ollama",
+    "1234": "LM Studio",
+    "27017": "MongoDB",
+    "2375": "Docker daemon (plain)",
+    "2376": "Docker daemon (TLS)",
+    "5672": "RabbitMQ",
+    "15672": "RabbitMQ management",
+    "8200": "Vault",
+    "3478": "STUN/TURN"
 }
 
 # Label for a recognized port, or null if we have no hint.
 export func known_label(port) {
-    key := "${port}"
-    m := port_map()
-    if truthy(has_key(m, key)) {
-        return m[key]
-    }
-    return null
+    return get(PORT_LABELS, "${port}")
 }
 
 # True if `port` is one we recognize at all.

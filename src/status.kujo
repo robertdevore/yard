@@ -2,7 +2,7 @@
 from src.ports import scan
 from src.knownports import known_label, is_sensitive, infer_kind, sensitive_listener
 from src.state import load_display_state, get_entry
-from src.supervisor import supervisor
+from src.supervisor import supervisor, absolute_path
 from src.health import probe_target, probe_result, batch_health, passive_health, skipped
 
 export func build_services(config, do_health, server_port) {
@@ -11,18 +11,37 @@ export func build_services(config, do_health, server_port) {
     state := loaded["state"]
     mut specs := {}
     mut configured_ports := {}
+    mut registry_errors := {}
+    registry_path := absolute_path(config["path"])
     for svc in config["services"] {
         if svc["port"] != null {
             configured_ports["${svc["port"]}"] := svc
         }
-        spec := get(get_entry(state, svc["id"]), "supervisor")
+        entry := get_entry(state, svc["id"])
+        spec := get(entry, "supervisor")
+        bound := get(entry, "registry_path")
+        if bound != null && bound != registry_path {
+            registry_errors[svc["id"]] := "This service ID is tracked by another registry in the shared state directory."
+            continue
+        }
         if type(spec) == "dict" {
-            specs[svc["id"]] := spec
+            specs[svc["id"]] := {
+                "socket": get(spec, "socket"), "token": get(spec, "token"), "control_dir": get(spec, "control_dir")
+            }
         }
     }
-    snapshot := supervisor("snapshot", {"entries": specs}, 2000)
+    mut listener_ids := {}
+    for listener in scan_result["listeners"] {
+        listener_ids["${listener["pid"]}"] := true
+    }
+    snapshot := supervisor("snapshot", {"entries": specs, "listeners": keys(listener_ids)}, 2000)
     processes := get(get(snapshot, "receipt"), "processes", {})
     owned := get(get(snapshot, "receipt"), "owned", {})
+    ownership_errors := get(get(snapshot, "receipt"), "errors", {})
+    inspection_error := loaded["error"]
+    if inspection_error == null && snapshot["ok"] == false {
+        inspection_error = get(snapshot, "error", "Process identity inspection failed")
+    }
     mut sensitive_groups := {}
     for listener in scan_result["listeners"] {
         process := get(processes, "${listener["pid"]}")
@@ -56,9 +75,22 @@ export func build_services(config, do_health, server_port) {
                 }
             }
         }
-        status := registered(svc, listener, receipt, get_entry(state, id), processes, sensitive_groups, scan_result["ok"] && snapshot["ok"] && loaded["error"] == null)
+        service_error := get(registry_errors, id)
+        if service_error == null {
+            service_error = get(ownership_errors, id)
+        }
+        if service_error == null {
+            service_error = get(receipt, "error")
+        }
+        if service_error == null {
+            service_error = inspection_error
+        }
+        if service_error == null && scan_result["ok"] == false {
+            service_error = scan_result["error"]
+        }
+        status := registered(svc, listener, receipt, get_entry(state, id), processes, sensitive_groups, service_error)
         if do_health && status["state"] == "running" && status["sensitive"] == false {
-            target := probe_target(svc, server_port)
+            target := probe_target(svc, server_port, status["ip_version"])
             if target != null {
                 targets[id] := target
             }
@@ -83,26 +115,32 @@ export func build_services(config, do_health, server_port) {
         }
     }
 
-    return {"ok": (scan_result["ok"] && loaded["error"] == null), "scan_error": scan_result["error"], "state_error": loaded["error"], "services": output}
+    return {"ok": (scan_result["ok"] && inspection_error == null), "scan_error": scan_result["error"], "state_error": inspection_error, "services": output}
 }
 
-func registered(svc, listener, owned, entry, processes, sensitive_groups, trustworthy) {
+func registered(svc, listener, owned, entry, processes, sensitive_groups, inspection_error) {
     port := svc["port"]
-    pid := get(listener, "pid", get(owned, "child"))
+    pid := get(listener, "pid")
+    if pid == null {
+        pid = get(owned, "child")
+    }
+    restart_count := get(entry, "restart_count")
+    if type(restart_count) != "int" {
+        restart_count = 0
+    }
     group := get(owned, "pid")
     process := get(processes, "${pid}")
-    sensitive := svc["sensitive"] || is_sensitive(port, svc["start"]) || has_key(sensitive_groups, "${group}") == 1
+    sensitive := svc["sensitive"] || get(entry, "sensitive", false) == true || is_sensitive(port, svc["start"]) || has_key(sensitive_groups, "${group}") == 1
     if listener != null && sensitive_listener(listener, svc, get(process, "executable")) {
         sensitive = true
     }
     has_start := svc["enabled"] && type(svc["start"]) == "string" && trim(svc["start"]) != ""
     state := "stopped"
     diagnostic := get(entry, "error")
-    if trustworthy == false {
+    if inspection_error != null {
         state = "unknown"
-        diagnostic = "Listener or process identity inspection was incomplete."
-    }
-    if owned != null {
+        diagnostic = inspection_error
+    } else if owned != null {
         state = "running"
         if get(owned, "stopping") && get(entry, "outcome") != "stop_failed" {
             state = "stopping"
@@ -158,11 +196,11 @@ func registered(svc, listener, owned, entry, processes, sensitive_groups, trustw
         "user": get(listener, "user"), "address": get(listener, "address"),
         "ip_version": get(listener, "ip_version"), "known_label": known_label(port),
         "kind": infer_kind(port, get(process, "executable")), "state": state, "diagnostic": diagnostic,
-        "started_at": get(entry, "started_at"), "restart_count": get(entry, "restart_count", 0),
+        "started_at": get(entry, "started_at"), "restart_count": restart_count,
         "health_status": health["status"], "http_status": null, "response_ms": null,
         "actions": {
             "open": (state == "running" && open != null), "copy": (open != null),
-            "start": (has_start && owned == null && listener == null && trustworthy),
+            "start": (has_start && owned == null && listener == null && inspection_error == null),
             "stop": (owned != null), "force_stop": (owned != null && sensitive == false),
             "restart": (has_start && owned != null && state != "stopping"),
             "logs": true, "inspect": true, "claim": false

@@ -109,9 +109,14 @@ func guarded(req, handler) {
         if type(content) != "array" || len(content) != 1 || to_lower(trim(split(content[0], ";")[0])) != "application/json" {
             return json_response(415, {"ok": false, "error": "Use application/json"})
         }
-        if type(parse_body(req)) != "dict" {
+        body := parse_body(req)
+        if type(body) != "dict" {
             return json_response(400, {"ok": false, "error": "Request body must be a JSON object"})
         }
+        if token_ok(body) == false {
+            return deny()
+        }
+        req["yard_body"] := body
     }
     resp := set_header(handler(req), "Cache-Control", "no-store")
     return set_header(resp, "X-Content-Type-Options", "nosniff")
@@ -146,9 +151,9 @@ func status_snapshot(req) {
     if want_health(req) == false {
         return services_payload(false, YARD_PORT)
     }
-    if STATUS_CACHE == null || current_timestamp() - STATUS_TIME >= 1000 {
+    if STATUS_CACHE == null || performance_now() - STATUS_TIME >= 1000 {
         STATUS_CACHE = services_payload(true, YARD_PORT)
-        STATUS_TIME = current_timestamp()
+        STATUS_TIME = performance_now()
     }
     return STATUS_CACHE
 }
@@ -170,10 +175,7 @@ func h_registry(req) {
 }
 
 func h_registry_action(req) {
-    body := parse_body(req)
-    if token_ok(body) == false {
-        return deny()
-    }
+    body := req["yard_body"]
     result := registry_action(body)
     STATUS_CACHE = null
     if result["ok"] == false {
@@ -183,10 +185,7 @@ func h_registry_action(req) {
 }
 
 func h_projects(req) {
-    body := parse_body(req)
-    if token_ok(body) == false {
-        return deny()
-    }
+    body := req["yard_body"]
     return json_response(200, discover_projects(get(body, "root")))
 }
 
@@ -204,46 +203,30 @@ func h_logs(req) {
 }
 
 func h_start(req) {
-    body := parse_body(req)
-    if token_ok(body) == false {
-        return deny()
-    }
     STATUS_CACHE = null
     return json_response(200, service_action(req["params"]["id"], "start", false, false))
 }
 
 func h_stop(req) {
-    body := parse_body(req)
-    if token_ok(body) == false {
-        return deny()
-    }
+    body := req["yard_body"]
     STATUS_CACHE = null
     return json_response(200, service_action_target(req["params"]["id"], "stop", bflag(body, "force"), bflag(body, "confirm"), get(body, "target")))
 }
 
 func h_restart(req) {
-    body := parse_body(req)
-    if token_ok(body) == false {
-        return deny()
-    }
+    body := req["yard_body"]
     STATUS_CACHE = null
     return json_response(200, service_action_target(req["params"]["id"], "restart", false, bflag(body, "confirm"), get(body, "target")))
 }
 
 func h_proc_stop(req) {
-    body := parse_body(req)
-    if token_ok(body) == false {
-        return deny()
-    }
+    body := req["yard_body"]
     pid := parse_int(req["params"]["pid"])
     return json_response(200, stop_process_action(pid, bflag(body, "force"), bflag(body, "confirm")))
 }
 
 func h_proc_force(req) {
-    body := parse_body(req)
-    if token_ok(body) == false {
-        return deny()
-    }
+    body := req["yard_body"]
     pid := parse_int(req["params"]["pid"])
     return json_response(200, stop_process_action(pid, true, bflag(body, "confirm")))
 }
