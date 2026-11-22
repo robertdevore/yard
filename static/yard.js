@@ -6,6 +6,7 @@ const dialog = $('dialog');
 const panel = $('dialog-content');
 const history = new Map();
 const busy = new Map();
+const savingFavorites = new Set();
 let current = [];
 let loading;
 let view = 'services';
@@ -193,14 +194,14 @@ function serviceRow(service) {
   const row = element('li', null, 'service-row');
   row.dataset.service = service.id;
   const name = element('div', null, 'name-block');
+  const star = button(service.favorite ? '★' : '☆', () => toggleFavorite(service), 'favorite');
+  star.setAttribute('aria-label', `Favorite ${service.name}`);
+  star.setAttribute('aria-pressed', String(service.favorite));
+  star.title = service.favorite ? 'Remove from favorites' : 'Add to favorites';
+  star.dataset.focus = `${service.id}-favorite`;
   const details = button(service.name, () => serviceDetails(service), 'name-button');
   details.dataset.focus = `${service.id}-details`;
-  if (service.favorite) {
-    const star = element('span', '★', 'favorite');
-    star.setAttribute('aria-label', 'Favorite');
-    name.append(star);
-  }
-  name.append(details, element('p', service.description || (service.group === 'Ungrouped' ? '' : service.group)));
+  name.append(star, details, element('p', service.description || (service.group === 'Ungrouped' ? '' : service.group)));
   const [label, , style] = classify(service);
   const state = element('div', null, `status ${style}`);
   state.append(element('span', null, `dot ${style}`), document.createTextNode(label));
@@ -277,6 +278,24 @@ async function refreshAfterMutation() {
   // An in-flight response may describe the state before the write completed.
   if (loading) await loading;
   await refresh();
+}
+
+async function toggleFavorite(service) {
+  const {id, name} = service;
+  if (savingFavorites.has(id)) return;
+  savingFavorites.add(id);
+  const favorite = !service.favorite;
+  try {
+    await request('/api/registry', {operation: 'edit', id, service: {id, favorite}});
+    if (loading) await loading;
+    current = current.map(item => item.managed && item.id === id ? {...item, favorite} : item);
+    render();
+    notice(favorite ? `Starred ${name}` : `Unstarred ${name}`);
+  } catch (error) {
+    notice(error.message, true);
+  } finally {
+    savingFavorites.delete(id);
+  }
 }
 
 function confirmAction(title, text, label) {

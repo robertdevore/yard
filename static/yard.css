@@ -101,11 +101,13 @@ input:not([type=checkbox]),select{min-width:0;border:1px solid var(--line);backg
 ul{margin:0;padding:0;list-style:none}
 .service-row+.service-row,.discovery-row+.discovery-row{border-top:1px solid var(--line)}
 .service-row:hover,.discovery-row:hover{background:#f8faff}
-.name-block{min-width:0}
+.name-block{min-width:0;display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:6px;align-items:center;justify-items:start}
 .name-button{display:inline;white-space:normal;text-align:left;padding:0;border:0;min-height:0;background:transparent;font-size:15px}
 .name-button:hover{background:transparent;text-decoration:underline}
 .name-block p,.status small,.discovery-row small{display:block;color:var(--muted);font-size:12px;overflow-wrap:anywhere}
-.favorite{color:var(--amber-ink);font-size:12px;padding-right:4px}
+.name-block p{grid-column:2}
+.favorite{color:var(--muted);font-size:18px;padding:0;width:26px;min-height:26px;border-color:transparent;background:transparent;line-height:1}
+.favorite[aria-pressed="true"]{color:var(--amber-ink)}
 .status{min-width:0;font-size:12px;font-weight:650;line-height:1.35}
 .status .dot{margin-right:6px;vertical-align:1px}
 .status small{font-weight:400;padding-left:14px;margin-top:2px}

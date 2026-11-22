@@ -68,6 +68,19 @@ def run():
         page.locator("#sort").select_option("favorite")
         expect(page.locator(".name-button").first).to_have_text("Local Dashboard")
 
+        star = page.get_by_role("button", name="Favorite Background Worker", exact=True)
+        expect(star).to_have_attribute("aria-pressed", "false")
+        star.focus()
+        page.keyboard.press("Space")
+        expect(star).to_have_attribute("aria-pressed", "true")
+        expect(star).to_be_focused()
+        expect(page.locator(".name-button").first).to_have_text("Background Worker")
+        page.reload()
+        expect(star).to_have_attribute("aria-pressed", "true")
+        star.click()
+        expect(star).to_have_attribute("aria-pressed", "false")
+        expect(page.locator(".name-button").first).to_have_text("Local Dashboard")
+
         page.get_by_role("button", name="Start Local Dashboard").click()
         expect(row("Local Dashboard")).to_contain_text("Healthy")
         with page.expect_popup() as popup:

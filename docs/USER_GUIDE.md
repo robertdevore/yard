@@ -22,8 +22,12 @@ before registering them.
 | Python static preview | Directory containing files to preview | `python3 -m http.server 8000 --bind 127.0.0.1` | `http://127.0.0.1:8000/` |
 
 For workers without a network listener, leave the port empty and select a
-process health check. In Advanced Settings you can add a favorite, a required
-executable, environment reference names, and shutdown or startup deadlines.
+process health check. In Advanced Settings you can set a required executable,
+environment reference names, and shutdown or startup deadlines.
+
+Click the star beside a service name to add or remove a favorite. The default
+**Favorites first** sort keeps starred services at the top. Yard saves your
+favorites in the registry.
 
 ## Control and troubleshoot
 
