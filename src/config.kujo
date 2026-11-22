@@ -345,8 +345,8 @@ func validate_fields(entry, port) {
             }
         }
     }
-    if port == null && get(entry, "start") == null {
-        return "A service needs a port or a startup command"
+    if port == null && get(entry, "start") == null && get(entry, "enabled") != false {
+        return "A service needs a port or a startup command unless management is disabled"
     }
     return null
 }

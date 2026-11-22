@@ -123,6 +123,29 @@ class YardIntegration(unittest.TestCase):
         self.assertFalse(yard.action("second", "start")["ok"])
         self.assertEqual(state.read_text(), "{interrupted")
 
+    def test_inventory_entry_can_wait_for_an_unshared_port(self):
+        port = free_port()
+        yard = self.yard([{"id": "existing", "port": port}])
+        yard.start_yard()
+        pending = {"id": "queued", "name": "Queued service", "enabled": False,
+                   "description": f"Default port {port} is assigned to existing."}
+        code, result = yard.registry_action("import", registry={"services": [pending]})
+        self.assertEqual(code, 200, result)
+        status = yard.lookup("queued")
+        self.assertIsNone(status["port"])
+        self.assertFalse(status["actions"]["start"])
+        self.assertEqual(yard.registry_action("edit", id="queued",
+                         service={"id": "queued", "enabled": True})[0], 400)
+        self.assertEqual(yard.registry_action("edit", id="queued",
+                         service={"id": "queued", "port": port})[0], 400)
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            new_port = reservation.getsockname()[1]
+            code, result = yard.registry_action("edit", id="queued",
+                              service={"id": "queued", "port": new_port})
+        self.assertEqual(code, 200, result)
+        self.assertEqual(yard.lookup("queued")["port"], new_port)
+
     def test_registry_writes_serialize_across_state_directories(self):
         first = self.yard()
         second = self.yard()

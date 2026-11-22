@@ -104,7 +104,8 @@ function classify(service) {
   if (busy.has(service.id)) return [busy.get(service.id), 'attention', 'warn'];
   if (service.untracked) return ['External listener', 'attention', 'external'];
   if (service.state === 'stopped') {
-    return [service.enabled ? 'Stopped' : 'Disabled', 'stopped', ''];
+    const label = service.enabled ? 'Stopped' : service.port == null ? 'No port assigned' : 'Not listening';
+    return [label, 'stopped', ''];
   }
   if (service.state === 'running') {
     if (['unhealthy', 'timeout', 'connection_failed', 'not_http'].includes(service.health_status) && !service.sensitive) {

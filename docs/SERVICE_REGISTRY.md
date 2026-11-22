@@ -48,8 +48,11 @@ fields have changed. Stop managed services before moving their registry or state
 | `env` | Array of required environment variable names inherited from the Yard process |
 | `enabled`, `favorite`, `sensitive` | Management switch, favorite, and additional stop protections |
 
-Port-only rows can be used to observe a known endpoint. Services without a
-port need a startup command. Disabling management prevents Start and Restart
+Port-only rows can be used to observe a known endpoint. When a port is shared
+or still undecided, turn off **Allow management** and save the entry with its
+port and startup command blank. Yard shows it as **No port assigned**. Add a
+unique port to observe it once the application is configured to use that port.
+Enabled services need either a port or a startup command. Disabling management prevents Start and Restart
 while retaining Stop for an already-owned group. The registry supports up to
 250 entries through the UI. The legacy `tags` and `stop` fields are preserved.
 The supervisor handles shutdown through OS signals.
