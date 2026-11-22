@@ -223,7 +223,7 @@ async function refresh() {
           history.set(service.id, [{time: data.generated_at, label}, ...samples].slice(0, 8));
         }
       }
-      const diagnostic = [data.scan_error, ...data.config.errors, ...data.config.warnings].filter(Boolean).join(' · ');
+      const diagnostic = [data.scan_error, data.state_error, ...data.config.errors, ...data.config.warnings].filter(Boolean).join(' · ');
       $('diagnostics').textContent = diagnostic;
       $('diagnostics').hidden = !diagnostic;
       $('updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;

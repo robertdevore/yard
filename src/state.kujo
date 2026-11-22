@@ -43,11 +43,11 @@ export func ensure_dirs() {
 
 # Display remains available when a state file is unreadable. Control actions
 # use the strict reader so they never replace unreadable state with an empty map.
-export func load_state() {
+export func load_display_state() {
     try {
-        return load_control_state()
+        return {"state": load_control_state(), "error": null}
     } except e {
-        return {}
+        return {"state": {}, "error": "Managed state is invalid or unreadable. Restore a valid copy before using lifecycle actions."}
     }
 }
 

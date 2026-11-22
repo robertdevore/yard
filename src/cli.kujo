@@ -13,7 +13,7 @@ from src.config import resolve_path, load, service_by_id
 from src.api import load_cfg, service_action, stop_port_action
 from src.status import build_services, summarize
 from src.state import ensure_dirs, state_dir, load_control_state
-from src.supervisor import supervisor
+from src.supervisor import supervisor, absolute_path
 from src.ports import scan_listeners
 from src.util import truthy, display, pad_right, shell_quote, includes, is_http_url
 
@@ -96,12 +96,15 @@ func cmd_scan(tokens) {
     }
     do_health := has_flag(parsed, "no-health") == false
     config := load_cfg()
-    built := build_services(config, do_health, "1", null)
+    built := build_services(config, do_health, null)
     services := built["services"]
     if has_flag(parsed, "json") {
         payload := {"summary": summarize(services), "services": services}
-        if built["ok"] == false {
+        if built["scan_error"] != null {
             payload["scan_error"] := built["scan_error"]
+        }
+        if built["state_error"] != null {
+            payload["state_error"] := built["state_error"]
         }
         print(to_json_pretty(payload))
         if built["ok"] == false {
@@ -111,6 +114,9 @@ func cmd_scan(tokens) {
     }
     if built["scan_error"] != null {
         print("scanner: ${built["scan_error"]}")
+    }
+    if built["state_error"] != null {
+        print("state: ${built["state_error"]}")
     }
     for error in config["errors"] {
         print("config error: ${error}")
@@ -337,8 +343,18 @@ func cmd_doctor(tokens) {
             issues = push(issues, "${id}: working directory is missing")
         }
         executable := svc["executable"]
-        if executable != null && execute_status("command -v " + shell_quote(executable)).exitcode != 0 {
-            issues = push(issues, "${id}: required executable '${executable}' is unavailable")
+        if executable != null {
+            test_command := "command -v " + shell_quote(executable)
+            if truthy(contains(executable, "/")) {
+                target := executable
+                if starts_with(target, "/") == false {
+                    target = join_path(absolute_path(svc["cwd"]), target)
+                }
+                test_command = "test -x " + shell_quote(target)
+            }
+            if execute_status(test_command).exitcode != 0 {
+                issues = push(issues, "${id}: required executable '${executable}' is unavailable")
+            }
         }
         for key in svc["env"] {
             if env_or(key, "") == "" {

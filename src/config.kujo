@@ -346,8 +346,8 @@ func validate_fields(entry, port) {
         return "Expected HTTP status must be 100–599 and requires an HTTP check"
     }
     executable := get(entry, "executable")
-    if executable != null && (executable == "" || starts_with(executable, "-") || regex_match(executable, "[[:space:]]")) {
-        return "Required executable must be a command name or a path without spaces"
+    if executable != null && (executable == "" || starts_with(executable, "-") || (regex_match(executable, "[[:space:]]") && contains(executable, "/") == 0)) {
+        return "Required executable must be a command name or executable path"
     }
     refs := get(entry, "env")
     if refs != null {

@@ -87,7 +87,10 @@ def supervise(spec):
             signal.signal(signal.SIGTERM, lambda *_: None)
             env = dict(os.environ)
             env["PWD"] = spec["cwd"]
-            secrets = [env[name].encode() for name in spec["env"] if env.get(name)]
+            names = set(spec["env"])
+            names.update(name for name, value in env.items() if len(value) >= 6 and
+                         re.search(r"SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|CREDENTIAL|DATABASE_URL", name, re.I))
+            secrets = [env[name].encode() for name in names if env.get(name)]
             log = open_log(Path(spec["log"]))
             try:
                 child = subprocess.Popen(
@@ -131,25 +134,32 @@ def request(spec, action):
     address = spec["socket"]
     if not re.fullmatch(r"[a-zA-Z0-9_-]{24,64}\.sock", address):
         raise ValueError("Invalid supervisor address")
-    try:
-        with socket.socket(socket.AF_UNIX) as client:
-            client.settimeout(0.6)
-            client.connect(address)
-            client.sendall(json.dumps({"token": spec["token"], "action": action}).encode() + b"\n")
-            with client.makefile("rb") as stream:
-                raw = stream.read(4096)
-                if not raw:
-                    raise ValueError("Supervisor did not verify this ownership record")
-                return json.loads(raw)
-    except (FileNotFoundError, ConnectionRefusedError):
-        return None
+    for _ in range(3):
+        try:
+            with socket.socket(socket.AF_UNIX) as client:
+                client.settimeout(0.6)
+                client.connect(address)
+                client.sendall(json.dumps({"token": spec["token"], "action": action}).encode() + b"\n")
+                with client.makefile("rb") as stream:
+                    raw = stream.read(4096)
+                    if raw:
+                        return json.loads(raw)
+        except (FileNotFoundError, ConnectionRefusedError):
+            return None
+        except (ConnectionResetError, BrokenPipeError):
+            pass
+        # The server can exit after a connect enters its accept backlog.
+        time.sleep(0.02)
+    raise ValueError("Supervisor did not verify this ownership record")
 
 
 def command(action, spec):
     if action == "launch":
         runtime = spec.get("executable")
-        if runtime and not shutil.which(runtime):
-            raise ValueError(f"Required executable is unavailable: {runtime}")
+        if runtime:
+            executable = str(Path(spec["cwd"]) / runtime) if "/" in runtime else runtime
+            if not shutil.which(executable):
+                raise ValueError(f"Required executable is unavailable: {runtime}")
         missing = [name for name in spec["env"] if not os.environ.get(name)]
         if missing:
             raise ValueError("Missing required environment variables: " + ", ".join(missing))
@@ -276,8 +286,14 @@ def diagnostics(action, spec):
         return inspect_process(spec["pid"])
     if action == "health":
         results = {}
+        items = list(spec.items())
+        if len(items) > 16:
+            # Rotate the first batch between dashboard refreshes so expensive
+            # targets late in a long list still receive probe time.
+            offset = (int(time.time() / 4) * 16) % len(items)
+            items = items[offset:] + items[:offset]
         with ThreadPoolExecutor(max_workers=16) as pool:
-            futures = {pool.submit(probe, target): key for key, target in spec.items()}
+            futures = {pool.submit(probe, target): key for key, target in items}
             try:
                 for complete in as_completed(futures, timeout=1.05):
                     results[futures[complete]] = complete.result()

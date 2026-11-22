@@ -13,7 +13,7 @@
 # (which execute with shared globals) can read it.
 
 from src.web import index_html, web_asset
-from src.api import services_payload, summary_payload, ports_payload
+from src.api import services_payload, ports_payload
 from src.api import service_action, service_action_target, stop_process_action, logs_payload
 from src.util import truthy
 from src.state import ensure_dirs, state_dir
@@ -22,7 +22,6 @@ from src.registry import registry_payload, registry_action
 from src.discovery import discover_projects, inspect_listener
 
 HOST := "127.0.0.1"
-HEALTH_TIMEOUT := "1"
 LOG_LINES := 300
 
 # Action token for this server session. Set by serve() before listening.
@@ -132,18 +131,26 @@ func h_index(req) {
 }
 
 func h_summary(req) {
-    return json_response(200, summary_payload(want_health(req), HEALTH_TIMEOUT, YARD_PORT))
+    snapshot := status_snapshot(req)
+    return json_response(200, {
+        "ok": snapshot["ok"], "generated_at": snapshot["generated_at"], "scan_error": snapshot["scan_error"],
+        "state_error": snapshot["state_error"], "config": snapshot["config"], "summary": snapshot["summary"]
+    })
 }
 
 func h_services(req) {
+    return json_response(200, status_snapshot(req))
+}
+
+func status_snapshot(req) {
     if want_health(req) == false {
-        return json_response(200, services_payload(false, HEALTH_TIMEOUT, YARD_PORT))
+        return services_payload(false, YARD_PORT)
     }
     if STATUS_CACHE == null || current_timestamp() - STATUS_TIME >= 1000 {
-        STATUS_CACHE = services_payload(true, HEALTH_TIMEOUT, YARD_PORT)
+        STATUS_CACHE = services_payload(true, YARD_PORT)
         STATUS_TIME = current_timestamp()
     }
-    return json_response(200, STATUS_CACHE)
+    return STATUS_CACHE
 }
 
 func h_css(req) {

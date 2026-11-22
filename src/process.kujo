@@ -69,7 +69,7 @@ func control_locked(svc, services, action, force, confirm, target) {
         }
     }
     scan := scan_listeners()
-    if scan["ok"] == false && (action != "stop" || owned == null) {
+    if scan["ok"] == false {
         return failure(scan["error"])
     }
     listeners := scan["processes"]
@@ -115,6 +115,10 @@ func control_locked(svc, services, action, force, confirm, target) {
         spec["shutdown_timeout"] := svc["shutdown_timeout"]
         stopped := supervisor(operation, spec, (svc["shutdown_timeout"] + 2) * 1000)
         if stopped["ok"] == false {
+            entry["outcome"] := "stop_failed"
+            entry["error"] := get(stopped, "error")
+            state[id] := entry
+            save_state(state)
             return stopped
         }
         entry["outcome"] := "stopped"
@@ -187,7 +191,7 @@ func launch(svc, state, previous, restarting) {
         if ready {
             health = service_health(svc, svc["probe_timeout_ms"] / 1000.0)["status"]
             if health == "healthy" || health == "process" || health == "not_checked" {
-                if tries > 0 {
+                if tries > 0 || svc["port"] != null {
                     entry["outcome"] := "running"
                     entry["health"] := health
                     if restarting {

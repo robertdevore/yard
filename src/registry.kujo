@@ -75,7 +75,7 @@ func registry_locked(body) {
                     if running["ok"] == false {
                         return running
                     }
-                    if running["receipt"] != null && (operation == "remove" || "${get(entry, "port")}" != "${get(previous, "port")}") {
+                    if running["receipt"] != null && (operation == "remove" || (has_key(entry, "port") == 1 && "${get(entry, "port")}" != "${get(previous, "port")}")) {
                         return failure("Stop the Yard-owned service before removing it or changing its port")
                     }
                 }

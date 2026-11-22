@@ -28,8 +28,9 @@ export func inspect_listener(pid) {
             answer := supervisor("inspect", {"pid": pid}, 2400)
             after := process_identity(pid)
             if after["started"] == before["started"] && answer["ok"] {
-                answer["receipt"]["process_started"] := before["started"]
-                return answer
+                evidence := answer["receipt"]
+                evidence["process_started"] := before["started"]
+                return {"ok": true, "receipt": evidence}
             }
             break
         }

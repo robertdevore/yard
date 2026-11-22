@@ -35,29 +35,17 @@ func config_meta(config) {
 }
 
 # GET /api/services — full service list + summary.
-export func services_payload(do_health, timeout_secs, server_port) {
+export func services_payload(do_health, server_port) {
     config := load_cfg()
-    built := build_services(config, do_health, timeout_secs, server_port)
+    built := build_services(config, do_health, server_port)
     summary := summarize(built["services"])
     return {
         "ok": built["ok"],
         "generated_at": iso_now(),
         "scan_error": built["scan_error"],
+        "state_error": built["state_error"],
         "summary": summary,
         "services": built["services"],
-        "config": config_meta(config)
-    }
-}
-
-# GET /api/summary — just the summary cards + config health.
-export func summary_payload(do_health, timeout_secs, server_port) {
-    config := load_cfg()
-    built := build_services(config, do_health, timeout_secs, server_port)
-    return {
-        "ok": built["ok"],
-        "generated_at": iso_now(),
-        "scan_error": built["scan_error"],
-        "summary": summarize(built["services"]),
         "config": config_meta(config)
     }
 }

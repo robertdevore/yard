@@ -1,14 +1,15 @@
 # Compose registered services, listeners and verified supervisor receipts.
 from src.ports import scan
 from src.knownports import known_label, is_sensitive, infer_kind, sensitive_listener
-from src.state import load_state, get_entry
+from src.state import load_display_state, get_entry
 from src.supervisor import supervisor
 from src.health import probe_target, probe_result, batch_health, passive_health, skipped
 from src.config import service_for_port
 
-export func build_services(config, do_health, health_timeout_secs, server_port) {
+export func build_services(config, do_health, server_port) {
     scan_result := scan()
-    state := load_state()
+    loaded := load_display_state()
+    state := loaded["state"]
     mut specs := {}
     for svc in config["services"] {
         spec := get(get_entry(state, svc["id"]), "supervisor")
@@ -52,7 +53,7 @@ export func build_services(config, do_health, health_timeout_secs, server_port) 
                 }
             }
         }
-        status := registered(svc, listener, receipt, get_entry(state, id), processes, sensitive_groups, scan_result["ok"] && snapshot["ok"])
+        status := registered(svc, listener, receipt, get_entry(state, id), processes, sensitive_groups, scan_result["ok"] && snapshot["ok"] && loaded["error"] == null)
         if do_health && status["state"] == "running" && status["sensitive"] == false {
             target := probe_target(svc, server_port)
             if target != null {
@@ -79,7 +80,7 @@ export func build_services(config, do_health, health_timeout_secs, server_port) 
         }
     }
 
-    return {"ok": scan_result["ok"], "scan_error": scan_result["error"], "services": output}
+    return {"ok": (scan_result["ok"] && loaded["error"] == null), "scan_error": scan_result["error"], "state_error": loaded["error"], "services": output}
 }
 
 func registered(svc, listener, owned, entry, processes, sensitive_groups, trustworthy) {
@@ -100,7 +101,7 @@ func registered(svc, listener, owned, entry, processes, sensitive_groups, trustw
     }
     if owned != null {
         state = "running"
-        if get(owned, "stopping") {
+        if get(owned, "stopping") && get(entry, "outcome") != "stop_failed" {
             state = "stopping"
         } else {
             if port != null && listener == null {
@@ -121,6 +122,9 @@ func registered(svc, listener, owned, entry, processes, sensitive_groups, trustw
             }
             if get(entry, "outcome") == "failed" {
                 state = "failed"
+            }
+            if get(entry, "outcome") == "stop_failed" && state == "stopped" {
+                diagnostic = null
             }
         }
     }
