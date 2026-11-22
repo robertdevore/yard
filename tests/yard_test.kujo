@@ -330,14 +330,14 @@ func fake_status(state, managed, sensitive, health, untracked) {
 
 func test_web_status_language() {
     html := index_html("test-token")
-    check(contains_ci(html, "untracked"), "dashboard exposes untracked status")
-    check(contains_ci(html, "port conflict") == false, "dashboard avoids misleading port conflict label")
-    check(contains_ci(html, "dither-track"), "dashboard includes dithered metric charts")
-    check(contains_ci(html, "managed coverage"), "dashboard groups managed coverage data")
-    check(contains_ci(html, "data-summary-filter"), "dashboard metric charts expose filters")
-    check(contains_ci(html, "join('&#39;')"), "dashboard escapes apostrophes in attributes")
-    check(contains_ci(html, "encodeURIComponent(s.id)"), "dashboard encodes service ids in API paths")
-    check(contains_ci(html, "if(!viewReady)applyViewFromUrl()"), "dashboard reapplies URL filters after groups load")
+    check(contains_ci(html, "test-token"), "dashboard embeds the supplied action token")
+    check(contains_ci(html, "add service"), "dashboard exposes registration")
+    check(contains_ci(html, "discovery"), "dashboard provides a separate discovery view")
+    check(contains_ci(html, "search services"), "dashboard provides labeled search")
+    check(contains_ci(html, "aria-live"), "dashboard provides accessible status announcements")
+    check(contains_ci(html, "yard.js"), "dashboard uses the local JavaScript asset")
+    check(contains_ci(html, "yard.css"), "dashboard uses the local stylesheet")
+    check(contains_ci(html, "__YARD_TOKEN__") == false, "dashboard replaces the token placeholder")
 }
 
 # ---------------------------------------------------------------------------

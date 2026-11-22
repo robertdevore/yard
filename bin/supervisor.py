@@ -78,6 +78,8 @@ def drain(pipe, log, secrets):
 
 def supervise(spec):
     group = os.getpid()
+    if os.getpgrp() != group:
+        raise ValueError("Yard supervisor requires its own process group")
     stopping = False
     sock = spec["socket"]
     try:
