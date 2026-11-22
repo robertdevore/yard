@@ -6,3 +6,6 @@
 
 # OS noise
 .DS_Store
+
+# Python test and supervisor bytecode.
+__pycache__/

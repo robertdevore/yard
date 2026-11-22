@@ -12,9 +12,12 @@ from src.serve import serve
 from src.config import resolve_path, load, service_by_id
 from src.api import load_cfg, service_action, stop_port_action
 from src.status import build_services, summarize
+from src.state import ensure_dirs, state_dir, load_control_state
+from src.supervisor import supervisor
+from src.ports import scan_listeners
 from src.util import truthy, display, pad_right, shell_quote, includes, is_http_url
 
-VERSION := "0.1.0"
+VERSION := "2.0.0"
 DEFAULT_PORT := 9753
 
 # Yard's command switches are all valueless. Reject unknown switches and
@@ -254,7 +257,9 @@ func cmd_open(tokens) {
         if type(svc["open"]) != "null" {
             url = svc["open"]
         } else {
-            url = "http://127.0.0.1:${svc["port"]}"
+            if svc["port"] != null {
+                url = "http://127.0.0.1:${svc["port"]}"
+            }
         }
     }
     if is_http_url(url) == false {
@@ -285,11 +290,96 @@ func cmd_config(tokens) {
     }
     if sub == "show" {
         cfg := load(path)
-        print(to_json_pretty(cfg))
+        print(to_json_pretty({
+            "path": cfg["path"], "exists": cfg["exists"], "services": cfg["services"],
+            "errors": cfg["errors"], "warnings": cfg["warnings"]
+        }))
+        if len(cfg["errors"]) > 0 {
+            return 1
+        }
         return 0
     }
     print("usage: yard config [path|show]")
     return 2
+}
+
+func cmd_doctor(tokens) {
+    parsed := parse_args(tokens, ["json"], 0)
+    if parsed["error"] != null {
+        print("error: ${parsed["error"]}")
+        return 2
+    }
+    cfg := load_cfg()
+    mut issues := cfg["errors"]
+    for warning in cfg["warnings"] {
+        issues = push(issues, warning)
+    }
+    for tool in ["lsof", "ps", "curl", "python3", "git"] {
+        if execute_status("command -v " + tool).exitcode != 0 {
+            issues = push(issues, "Missing system utility: ${tool}")
+        }
+    }
+    try {
+        ensure_dirs()
+        load_control_state()
+        if execute_status("test -w " + shell_quote(state_dir())).exitcode != 0 {
+            issues = push(issues, "State directory is not writable")
+        }
+    } except e {
+        issues = push(issues, "State is unavailable: ${e}")
+    }
+    if supervisor("groups", {}, 1500)["ok"] == false {
+        issues = push(issues, "The POSIX process supervisor is unavailable")
+    }
+    for svc in cfg["services"] {
+        id := svc["id"]
+        if type(svc["start"]) == "string" && path_is_dir(svc["cwd"]) == false {
+            issues = push(issues, "${id}: working directory is missing")
+        }
+        executable := svc["executable"]
+        if executable != null && execute_status("command -v " + shell_quote(executable)).exitcode != 0 {
+            issues = push(issues, "${id}: required executable '${executable}' is unavailable")
+        }
+        for key in svc["env"] {
+            if env_or(key, "") == "" {
+                issues = push(issues, "${id}: missing environment reference '${key}'")
+            }
+        }
+    }
+    scan := scan_listeners()
+    if scan["ok"] == false {
+        issues = push(issues, scan["error"])
+    }
+    port := dashboard_port(null)
+    mut port_state := "available"
+    for listener in scan["processes"] {
+        if listener["port"] == port {
+            port_state = "listening (pid ${listener["pid"]})"
+        }
+    }
+    if type(port) != "int" || port < 1 || port > 65535 {
+        issues = push(issues, "Invalid dashboard port")
+    }
+    ok := len(issues) == 0
+    if has_flag(parsed, "json") {
+        print(to_json_pretty({
+            "ok": ok, "runtime": "Kujo (running)", "config": cfg["path"], "state": state_dir(),
+            "registered": len(cfg["services"]), "port": port, "port_state": port_state, "issues": issues
+        }))
+    } else {
+        print("Kujo is running · registry ${cfg["path"]} · ${len(cfg["services"])} services")
+        print("State: ${state_dir()} · dashboard port ${port}: ${port_state}")
+        if ok {
+            print("Yard doctor passed")
+        }
+        for issue in issues {
+            print("• ${issue}")
+        }
+    }
+    if ok {
+        return 0
+    }
+    return 1
 }
 
 func report(res, ok_msg) {
@@ -310,15 +400,16 @@ func print_help() {
     print("Usage: yard [command] [arguments]")
     print("")
     print("Commands:")
-    print("  (none)              Start the dashboard server (default)")
+    print("  (none)              Launch or reuse Yard and open the browser")
     print("  serve [port]        Start the dashboard (default port ${DEFAULT_PORT})")
     print("  scan [--json] [--no-health]   List detected localhost services")
     print("  open [id]           Open the dashboard, or a managed service's URL")
     print("  start <id>          Start a managed service")
     print("  stop <id> [--force] [--yes]   Stop a managed service")
     print("  restart <id> [--yes]          Restart a managed service")
-    print("  stop-port <port> [--force] [--yes]   Stop whatever listens on a port")
+    print("  stop-port <port> [--force] [--yes]   External listeners are read-only")
     print("  config [path|show]  Show config path (default) or dump parsed config")
+    print("  doctor [--json]     Check registry, tools, state and dashboard port")
     print("  version             Show version")
     print("  help                Show this help")
     print("")
@@ -361,6 +452,9 @@ export func main(argv) {
     }
     if cmd == "stop-port" {
         return cmd_stop_port(rest)
+    }
+    if cmd == "doctor" {
+        return cmd_doctor(rest)
     }
     if cmd == "config" {
         return cmd_config(rest)

@@ -1,23 +1,79 @@
 #!/usr/bin/env bash
-# Yard launcher.
-#
-# Thin convenience wrapper so you can type `yard <command>` instead of
-# `kujo run /path/to/yard.kujo <command>`.
-#
-# It runs Kujo on the project entrypoint, preserving your
-# current working directory (so the default ./.yard state dir and
-# ./yard.config.json land where you invoke it). Override the interpreter with
-# the KUJO environment variable, e.g.
-#   KUJO=/path/to/kujo/target/release/kujo yard scan
+# Resolve an installed symlink so the wrapper can find Kujo modules and assets.
 set -euo pipefail
-
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-KUJO="${KUJO:-kujo}"
-
-if ! command -v "$KUJO" >/dev/null 2>&1 && [ ! -x "$KUJO" ]; then
-  echo "yard: cannot find the Kujo executable ('$KUJO')." >&2
-  echo "Set KUJO to your kujo binary, e.g. KUJO=/path/to/kujo/target/release/kujo" >&2
+source_path="${BASH_SOURCE[0]}"
+while [[ -L "$source_path" ]]; do
+  source_dir="$(cd "$(dirname "$source_path")" && pwd)"
+  source_path="$(readlink "$source_path")"
+  [[ "$source_path" == /* ]] || source_path="$source_dir/$source_path"
+done
+project="$(cd "$(dirname "$source_path")/.." && pwd)"
+kujo_bin="${KUJO:-kujo}"
+if ! command -v "$kujo_bin" >/dev/null 2>&1; then
+  echo "yard: Kujo is missing. Install Kujo or set KUJO to its executable." >&2
   exit 127
 fi
+export YARD_ROOT="$project" YARD_SUPERVISOR="$project/bin/supervisor.py"
+while [[ "${1:-}" == --config || "${1:-}" == --state ]]; do
+  if [[ -z "${2:-}" ]]; then
+    echo "yard: $1 requires a path" >&2
+    exit 2
+  fi
+  if [[ "$1" == --config ]]; then export YARD_CONFIG="$2"; else export YARD_DIR="$2"; fi
+  shift 2
+done
+export YARD_CONFIG="${YARD_CONFIG:-$HOME/.config/yard/yard.config.json}"
+export YARD_DIR="${YARD_DIR:-$HOME/.config/yard/state}"
+YARD_CONFIG="${YARD_CONFIG/#\~\//$HOME/}"
+YARD_DIR="${YARD_DIR/#\~\//$HOME/}"
+[[ "$YARD_CONFIG" == /* ]] || YARD_CONFIG="$PWD/$YARD_CONFIG"
+[[ "$YARD_DIR" == /* ]] || YARD_DIR="$PWD/$YARD_DIR"
 
-exec "$KUJO" run "$PROJECT_DIR/yard.kujo" "$@"
+if [[ $# -ne 0 && !( $# -eq 1 && "$1" == open ) ]]; then
+  exec "$kujo_bin" run "$project/yard.kujo" "$@"
+fi
+
+port="${YARD_PORT:-9753}"
+if [[ ! "$port" =~ ^[0-9]{1,5}$ ]] || (( 10#$port < 1 || 10#$port > 65535 )); then
+  echo "yard: YARD_PORT must be a port from 1 to 65535." >&2
+  exit 2
+fi
+port="$((10#$port))"
+url="http://127.0.0.1:$port"
+identity() {
+  curl -q --noproxy '*' -fsS --max-time 0.5 "$url/api/identity" 2>/dev/null
+}
+instance="$(identity || true)"
+if [[ -z "$instance" ]]; then
+  umask 077
+  mkdir -p -- "$YARD_DIR"
+  if [[ -L "$YARD_DIR" || -L "$YARD_DIR/dashboard.log" ]]; then
+    echo "yard: dashboard state or log is a symbolic link." >&2
+    exit 1
+  fi
+  nohup "$kujo_bin" run "$project/yard.kujo" serve "$port" </dev/null >"$YARD_DIR/dashboard.log" 2>&1 &
+  for ((attempt=0; attempt<35; attempt++)); do
+    instance="$(identity || true)"
+    [[ -z "$instance" ]] || break
+    sleep 0.08
+  done
+fi
+if [[ -z "$instance" ]]; then
+  echo "yard: no Yard server answered at $url. Check $YARD_DIR/dashboard.log and the port." >&2
+  exit 1
+fi
+if ! python3 -c 'import json, os, sys
+data = json.load(sys.stdin)
+sys.exit(not (data.get("app") == "yard" and data.get("version") == "2.0"
+    and data.get("config") == os.environ["YARD_CONFIG"] and data.get("state") == os.environ["YARD_DIR"]))' <<< "$instance"; then
+  echo "yard: $url is serving a different instance. Choose another YARD_PORT or use its registry and state paths." >&2
+  exit 1
+fi
+if [[ "${YARD_NO_BROWSER:-}" != 1 ]]; then
+  if [[ "$(uname -s)" == Darwin ]]; then
+    open "$url"
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$url"
+  fi
+fi
+printf '%s\n' "$url"

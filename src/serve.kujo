@@ -12,11 +12,14 @@
 # The action token lives in a module-level global so the inline route handlers
 # (which execute with shared globals) can read it.
 
-from src.web import index_html
+from src.web import index_html, web_asset
 from src.api import services_payload, summary_payload, ports_payload
-from src.api import service_action, stop_process_action, logs_payload
+from src.api import service_action, service_action_target, stop_process_action, logs_payload
 from src.util import truthy
-from src.state import ensure_dirs
+from src.state import ensure_dirs, state_dir
+from src.config import resolve_path
+from src.registry import registry_payload, registry_action
+from src.discovery import discover_projects, inspect_listener
 
 HOST := "127.0.0.1"
 HEALTH_TIMEOUT := "1"
@@ -25,6 +28,8 @@ LOG_LINES := 300
 # Action token for this server session. Set by serve() before listening.
 mut YARD_TOKEN := ""
 mut YARD_PORT := 0
+mut STATUS_CACHE := null
+mut STATUS_TIME := 0
 
 # Start the dashboard on the loopback interface at `port`. Blocks until killed.
 export func serve(port) {
@@ -38,7 +43,7 @@ export func serve(port) {
     print("  Dashboard:  http://${HOST}:${port}")
     print("  Binding:    ${HOST} only (loopback)")
     print("  Config:     ${config_hint()}")
-    print("  State/logs: ${env_or("YARD_DIR", ".yard")}")
+    print("  State/logs: ${state_dir()}")
     print("  Action token issued for this session.")
     print("  Press Ctrl+C to stop.")
     print("")
@@ -49,7 +54,7 @@ export func serve(port) {
 }
 
 func config_hint() {
-    return env_or("YARD_CONFIG", "yard.config.json")
+    return resolve_path(null)
 }
 
 # Construct the routed server. Each handler is a thin closure delegating to a
@@ -57,6 +62,13 @@ func config_hint() {
 func build_server(port) {
     srv := http_listen(HOST, port)
     srv := srv.route("GET", "/", func(req) { return guarded(req, h_index) })
+    srv := srv.route("GET", "/yard.css", func(req) { return guarded(req, h_css) })
+    srv := srv.route("GET", "/yard.js", func(req) { return guarded(req, h_js) })
+    srv := srv.route("GET", "/api/identity", func(req) { return guarded(req, h_identity) })
+    srv := srv.route("GET", "/api/registry", func(req) { return guarded(req, h_registry) })
+    srv := srv.route("POST", "/api/registry", func(req) { return guarded(req, h_registry_action) })
+    srv := srv.route("POST", "/api/discovery/projects", func(req) { return guarded(req, h_projects) })
+    srv := srv.route("GET", "/api/discovery/processes/:pid", func(req) { return guarded(req, h_inspect_listener) })
     srv := srv.route("GET", "/api/summary", func(req) { return guarded(req, h_summary) })
     srv := srv.route("GET", "/api/services", func(req) { return guarded(req, h_services) })
     srv := srv.route("GET", "/api/ports", func(req) { return guarded(req, h_ports) })
@@ -90,7 +102,20 @@ func guarded(req, handler) {
     if type(origins) != "null" && (len(origins) != 1 || origins[0] != "http://${host}") {
         return deny_host()
     }
-    return set_header(handler(req), "Cache-Control", "no-store")
+    if req["method"] == "POST" {
+        if len(req["body"]) > 262144 {
+            return json_response(413, {"ok": false, "error": "JSON request exceeds 256 KiB"})
+        }
+        content := get(headers, "content-type")
+        if type(content) != "array" || len(content) != 1 || to_lower(trim(split(content[0], ";")[0])) != "application/json" {
+            return json_response(415, {"ok": false, "error": "Use application/json"})
+        }
+        if type(parse_body(req)) != "dict" {
+            return json_response(400, {"ok": false, "error": "Request body must be a JSON object"})
+        }
+    }
+    resp := set_header(handler(req), "Cache-Control", "no-store")
+    return set_header(resp, "X-Content-Type-Options", "nosniff")
 }
 
 func deny_host() {
@@ -102,7 +127,7 @@ func h_index(req) {
     resp := http_response(200, html)
     resp := set_header(resp, "Content-Type", "text/html; charset=utf-8")
     resp := set_header(resp, "X-Frame-Options", "DENY")
-    resp := set_header(resp, "Content-Security-Policy", "frame-ancestors 'none'; base-uri 'none'")
+    resp := set_header(resp, "Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
     return resp
 }
 
@@ -111,7 +136,55 @@ func h_summary(req) {
 }
 
 func h_services(req) {
-    return json_response(200, services_payload(want_health(req), HEALTH_TIMEOUT, YARD_PORT))
+    if want_health(req) == false {
+        return json_response(200, services_payload(false, HEALTH_TIMEOUT, YARD_PORT))
+    }
+    if STATUS_CACHE == null || current_timestamp() - STATUS_TIME >= 1000 {
+        STATUS_CACHE = services_payload(true, HEALTH_TIMEOUT, YARD_PORT)
+        STATUS_TIME = current_timestamp()
+    }
+    return json_response(200, STATUS_CACHE)
+}
+
+func h_css(req) {
+    return set_header(http_response(200, web_asset("yard.css")), "Content-Type", "text/css; charset=utf-8")
+}
+
+func h_js(req) {
+    return set_header(http_response(200, web_asset("yard.js")), "Content-Type", "text/javascript; charset=utf-8")
+}
+
+func h_identity(req) {
+    return json_response(200, {"app": "yard", "version": "2.0", "config": resolve_path(null), "state": state_dir()})
+}
+
+func h_registry(req) {
+    return json_response(200, registry_payload())
+}
+
+func h_registry_action(req) {
+    body := parse_body(req)
+    if token_ok(body) == false {
+        return deny()
+    }
+    result := registry_action(body)
+    STATUS_CACHE = null
+    if result["ok"] == false {
+        return json_response(400, result)
+    }
+    return json_response(200, result)
+}
+
+func h_projects(req) {
+    body := parse_body(req)
+    if token_ok(body) == false {
+        return deny()
+    }
+    return json_response(200, discover_projects(get(body, "root")))
+}
+
+func h_inspect_listener(req) {
+    return json_response(200, inspect_listener(parse_int(req["params"]["pid"])))
 }
 
 func h_ports(req) {
@@ -128,6 +201,7 @@ func h_start(req) {
     if token_ok(body) == false {
         return deny()
     }
+    STATUS_CACHE = null
     return json_response(200, service_action(req["params"]["id"], "start", false, false))
 }
 
@@ -136,7 +210,8 @@ func h_stop(req) {
     if token_ok(body) == false {
         return deny()
     }
-    return json_response(200, service_action(req["params"]["id"], "stop", bflag(body, "force"), bflag(body, "confirm")))
+    STATUS_CACHE = null
+    return json_response(200, service_action_target(req["params"]["id"], "stop", bflag(body, "force"), bflag(body, "confirm"), get(body, "target")))
 }
 
 func h_restart(req) {
@@ -144,7 +219,8 @@ func h_restart(req) {
     if token_ok(body) == false {
         return deny()
     }
-    return json_response(200, service_action(req["params"]["id"], "restart", false, bflag(body, "confirm")))
+    STATUS_CACHE = null
+    return json_response(200, service_action_target(req["params"]["id"], "restart", false, bflag(body, "confirm"), get(body, "target")))
 }
 
 func h_proc_stop(req) {
@@ -180,22 +256,22 @@ func want_health(req) {
 func parse_body(req) {
     b := "${req["body"]}"
     if trim(b) == "" {
-        return {}
+        return null
     }
     mut p := null
     try {
         p = parse_json(b)
     } except e {
-        return {}
+        return null
     }
     if type(p) != "dict" {
-        return {}
+        return null
     }
     return p
 }
 
 func token_ok(body) {
-    if has_key(body, "token") == 1 {
+    if type(body) == "dict" && has_key(body, "token") == 1 {
         return body["token"] == YARD_TOKEN
     }
     return false
@@ -203,7 +279,7 @@ func token_ok(body) {
 
 func bflag(body, key) {
     if has_key(body, key) == 1 {
-        return truthy(body[key])
+        return body[key] == true
     }
     return false
 }
