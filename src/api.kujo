@@ -74,12 +74,16 @@ export func ports_payload() {
 }
 
 export func service_action(id, action, force, confirm) {
+    return service_action_target(id, action, force, confirm, null)
+}
+
+export func service_action_target(id, action, force, confirm, target) {
     services := load_cfg()["services"]
     svc := service_by_id(services, id)
     if type(svc) != "dict" {
         return err("no such managed service: '${id}'")
     }
-    return action_result(control_service(svc, services, action, force, confirm), action, id)
+    return action_result(control_service(svc, action, force, confirm, target), action, id)
 }
 
 export func stop_process_action(pid, force, confirm) {

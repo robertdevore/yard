@@ -1,0 +1,138 @@
+# The registry shares the lifecycle lock. Its raw data is preserved across
+# edits so legacy fields and unknown metadata survive round trips.
+from src.config import load, resolve_path, extract_services, validate_services
+from src.process import failure
+from src.state import ensure_dirs, state_dir, load_control_state, get_entry
+from src.supervisor import supervisor
+from src.util import shell_quote
+
+export func registry_payload() {
+    cfg := load(resolve_path(null))
+    if len(cfg["errors"]) > 0 {
+        return {"ok": false, "error": cfg["errors"][0]}
+    }
+    return {"ok": true, "registry": cfg["raw"]}
+}
+
+export func registry_action(body) {
+    mut lock := null
+    mut result := null
+    try {
+        ensure_dirs()
+        lock = file_lock(join_path(state_dir(), "managed.lock"), 15000)
+        result = registry_locked(body)
+    } except e {
+        result = failure("Could not update registry: ${e}")
+    }
+    if lock != null {
+        file_unlock(lock)
+    }
+    return result
+}
+
+func registry_locked(body) {
+    path := resolve_path(null)
+    cfg := load(path)
+    if len(cfg["errors"]) > 0 || len(cfg["warnings"]) > 0 {
+        return failure("Resolve the existing registry errors or duplicate entries before editing")
+    }
+    operation := get(body, "operation")
+    if operation == "validate" {
+        return strict_validation(get(body, "registry"))
+    }
+    mut raw := cfg["raw"]
+    mut entries := extract_services(raw)
+    if operation == "import" {
+        incoming := get(body, "registry")
+        valid := strict_validation(incoming)
+        if valid["ok"] == false {
+            return valid
+        }
+        for service in extract_services(incoming) {
+            entries = push(entries, service)
+        }
+    } else {
+        id := get(body, "id")
+        entry := get(body, "service")
+        if operation == "add" && type(entry) == "dict" {
+            entries = push(entries, entry)
+        } else {
+            if operation != "edit" && operation != "remove" {
+                return failure("Choose a supported registry operation and provide the service configuration")
+            }
+            mut updated := []
+            mut found := false
+            for previous in entries {
+                if previous["id"] != id {
+                    updated = push(updated, previous)
+                    continue
+                }
+                found = true
+                entry_state := get_entry(load_control_state(), id)
+                spec := get(entry_state, "supervisor")
+                if type(spec) == "dict" {
+                    running := supervisor("status", spec, 1300)
+                    if running["ok"] == false {
+                        return running
+                    }
+                    if running["receipt"] != null && (operation == "remove" || "${get(entry, "port")}" != "${get(previous, "port")}") {
+                        return failure("Stop the Yard-owned service before removing it or changing its port")
+                    }
+                }
+                if operation == "edit" {
+                    if type(entry) != "dict" || get(entry, "id") != id {
+                        return failure("The service ID cannot be changed")
+                    }
+                    for key in keys(entry) {
+                        previous[key] := entry[key]
+                    }
+                    updated = push(updated, previous)
+                }
+            }
+            if found == false {
+                return failure("No registered service with that ID")
+            }
+            entries = updated
+        }
+    }
+    if type(raw) == "array" {
+        raw = entries
+    } else {
+        raw["services"] := entries
+    }
+    valid := strict_validation(raw)
+    if valid["ok"] == false {
+        return valid
+    }
+    if execute_status("test -L " + shell_quote(path)).exitcode == 0 {
+        return failure("Registry path is a symbolic link. Configure its real path before writing.")
+    }
+    if path_is_dir(dirname(path)) == false {
+        return failure("Registry parent directory does not exist")
+    }
+    if write_file_atomic(path, to_json_pretty(raw), true) != true {
+        return failure("Atomic registry write failed")
+    }
+    return {"ok": true, "error": null}
+}
+
+func strict_validation(raw) {
+    if type(raw) != "array" && type(raw) != "dict" {
+        return failure("Provide a JSON services array or an object containing services")
+    }
+    if type(raw) == "dict" && has_key(raw, "services") == 0 {
+        return failure("Registry object must contain services")
+    }
+    entries := extract_services(raw)
+    if type(entries) != "array" || len(entries) > 250 {
+        return failure("Provide a list of up to 250 services")
+    }
+    valid := validate_services(entries)
+    if len(valid["errors"]) > 0 {
+        return failure(valid["errors"][0])
+    }
+    if len(valid["warnings"]) > 0 {
+        return failure(valid["warnings"][0])
+    }
+    return {"ok": true, "error": null}
+}

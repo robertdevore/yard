@@ -24,12 +24,12 @@ export func scan() {
 # Keep separate listeners for control decisions. The status and raw ports
 # views retain their established one-row-per-port shape.
 export func scan_listeners() {
-    r := execute_status("lsof -nP -iTCP -sTCP:LISTEN +c 0")
+    r := execute_status("lsof -nP -iTCP -sTCP:LISTEN +c 0", {"timeout_ms": 1700, "max_output_bytes": 524288})
     output := trim(r.stdout)
     stderr := trim(r.stderr)
     parsed := parse_listener_rows(output)
     processes := parsed["processes"]
-    if r.stdout_truncated || parsed["skipped"] > 0 {
+    if r.timed_out || r.stdout_truncated || parsed["skipped"] > 0 {
         return {"ok": false, "error": "listener scan incomplete; lsof returned truncated or unrecognized rows", "processes": processes}
     }
     if r.exitcode == 0 || (r.exitcode == 1 && output == "" && stderr == "") {

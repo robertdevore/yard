@@ -1,317 +1,232 @@
-# Yard process control. The state lock is shared by CLI and HTTP service
-# actions and released by the OS if a Yard process exits.
-from src.util import truthy, shell_quote
-from src.ports import scan_listeners, process_identity, full_command
-from src.state import state_dir, load_control_state, save_state, get_entry, new_entry, log_path, ensure_dirs
-from src.config import service_for_port
+# Lifecycle actions and registry writes share a lock across CLI and dashboard.
+from src.util import truthy, iso_now
+from src.ports import scan_listeners, full_command
+from src.state import state_dir, load_control_state, save_state, get_entry, ensure_dirs
+from src.config import load, resolve_path, service_by_id, service_for_port
 from src.knownports import is_sensitive, sensitive_listener
+from src.supervisor import supervisor, absolute_path, groups
+from src.health import service_health
 
-export func control_service(svc, all_services, action, force, confirm) {
+export func control_service(svc, action, force, confirm, target) {
     mut lock := null
     try {
         ensure_dirs()
-        lock = file_lock(join_path(state_dir(), "managed.lock"), 5000)
+        lock = file_lock(join_path(state_dir(), "managed.lock"), 15000)
     } except e {
         return failure("could not lock managed state: ${e}")
     }
     mut result := null
     try {
-        result = control_locked(svc, all_services, action, force, confirm)
+        config := load(resolve_path(null))
+        current := service_by_id(config["services"], svc["id"])
+        if len(config["errors"]) > 0 || type(current) != "dict" {
+            result = failure("registry is invalid or the service was removed; review the configuration")
+        } else {
+            result = control_locked(current, config["services"], action, force, confirm, target)
+        }
     } except e {
-        result = failure("could not ${action} service '${svc["id"]}': ${e}")
+        result = failure("could not ${action} '${svc["id"]}': ${e}")
     }
     file_unlock(lock)
     return result
 }
 
-func control_locked(svc, all_services, action, force, confirm) {
+func control_locked(svc, services, action, force, confirm, target) {
     id := svc["id"]
-    cwd := svc["cwd"]
-    log_file := log_path(id)
-    if action != "stop" {
-        if type(svc["start"]) != "string" || trim(svc["start"]) == "" {
-            return failure("service '${id}' has no 'start' command configured")
-        }
-        if cwd == null || cwd == "" {
-            cwd = "."
-        }
-        if path_is_dir(cwd) == false {
-            return failure("service '${id}' cwd does not exist: ${cwd}")
-        }
-        if path_is_dir(log_file) {
-            return failure("service '${id}' log path is a directory: ${log_file}")
-        }
-    }
+    port := svc["port"]
     state := load_control_state()
     entry := get_entry(state, id)
+    spec := get(entry, "supervisor")
+    owned := null
+    if type(spec) == "dict" {
+        r := supervisor("status", spec, 1300)
+        if r["ok"] == false {
+            return r
+        }
+        owned = r["receipt"]
+        old_group := get(entry, "pid")
+        if owned == null && type(old_group) == "int" && get(entry, "outcome") != "stopped" {
+            table := groups()
+            for key in keys(table) {
+                if table[key] == old_group {
+                    return failure("The prior process group may still exist, but its supervisor is unavailable. Inspect it from its original launcher.")
+                }
+            }
+        }
+    }
+    if target != null && get(owned, "pid") != target {
+        return failure("The confirmed process group changed; inspect the service before trying again.")
+    }
+    if action != "stop" {
+        if svc["enabled"] == false {
+            return failure("Management is disabled for '${id}'")
+        }
+        if type(svc["start"]) != "string" || trim(svc["start"]) == "" {
+            return failure("Service '${id}' has no startup command")
+        }
+        if path_is_dir(svc["cwd"]) == false {
+            return failure("Working directory does not exist: ${svc["cwd"]}")
+        }
+    }
     scan := scan_listeners()
-    if scan["ok"] == false {
+    if scan["ok"] == false && (action != "stop" || owned == null) {
         return failure(scan["error"])
     }
-
     listeners := scan["processes"]
-    targets := listener_pids(listeners, svc["port"], null)
-    if len(targets) > 1 {
-        return failure("multiple processes listen on port ${svc["port"]}; inspect them before controlling this service")
+    occupied := port_listener(listeners, port)
+    if action == "start" && owned != null {
+        return failure("Service '${id}' is already running (process group ${owned["pid"]})")
     }
-    pid := null
-    if len(targets) == 1 {
-        pid = targets[0]
-        if action == "start" {
-            return failure("port ${svc["port"]} is already listening (pid ${pid})")
-        }
-    } else {
-        if type(entry) == "dict" {
-            pid = get(entry, "pid")
-        }
+    if owned == null && occupied != null {
+        return failure("Port ${port} is occupied by an external listener (PID ${occupied["pid"]}). Stop it from its own launcher.")
     }
-
-    mut started := null
-    if type(pid) == "int" {
-        identity := process_identity(pid)
-        if identity["error"] != null {
-            return failure(identity["error"])
+    if owned == null && action == "stop" {
+        if type(get(entry, "pid")) == "int" && type(spec) != "dict" {
+            return failure("Cannot verify legacy tracked PID. Use the application's original launcher.")
         }
-        started = identity["started"]
-        if len(targets) == 0 && started != null {
-            expected := get(entry, "process_started")
-            if expected == null {
-                return failure("cannot verify legacy tracked pid ${pid}; wait for a listener or stop it outside Yard")
-            }
-            if expected != started {
-                started = null
+        return {"ok": true, "error": null, "signal": "none", "note": "Service is already stopped"}
+    }
+    if owned != null {
+        sensitive := truthy(svc["sensitive"]) || is_sensitive(port, svc["start"])
+        table := groups()
+        if get(table, "${owned["pid"]}") != owned["pid"] {
+            return failure("Could not verify the running process group")
+        }
+        for listener in listeners {
+            if get(table, "${listener["pid"]}") == owned["pid"] {
+                current := service_for_port(services, listener["port"])
+                if sensitive_listener(listener, current, full_command(listener["pid"])) {
+                    sensitive = true
+                }
             }
         }
-    }
-
-    if action == "start" {
-        if started != null {
-            return failure("service '${id}' is already running (pid ${pid})")
+        if sensitive && force {
+            return failure("Force Stop is disabled for sensitive process group ${owned["pid"]}")
         }
-        return launch(svc, cwd, log_file, state, entry, false)
-    }
-
-    sensitive := truthy(svc["sensitive"]) || is_sensitive(svc["port"], svc["start"])
-    if started != null {
-        sensitive = sensitive || listener_sensitive(listeners, all_services, pid)
-    }
-    guard := confirmation(sensitive, force, confirm)
-    if guard != null {
-        return guard
-    }
-    if action == "stop" {
-        if type(pid) != "int" {
-            return failure("no running process found for '${id}'")
+        if (force || sensitive) && confirm == false {
+            return {"ok": false, "needs_confirm": true, "error": "Confirm ${action} of process group ${owned["pid"]}"}
         }
-        return signal_process(pid, started, force)
-    }
-    if started != null {
-        stopped := signal_process(pid, started, false)
+        operation := "stop"
+        signal := "TERM"
+        if force {
+            operation = "force"
+            signal = "KILL"
+        }
+        spec["shutdown_timeout"] := svc["shutdown_timeout"]
+        stopped := supervisor(operation, spec, (svc["shutdown_timeout"] + 2) * 1000)
         if stopped["ok"] == false {
             return stopped
         }
-        remaining := wait_for_exit(pid, started)
-        if remaining != null {
-            return failure(remaining)
+        entry["outcome"] := "stopped"
+        entry["error"] := null
+        state[id] := entry
+        save_state(state)
+        remaining := scan_listeners()
+        if remaining["ok"] == false {
+            return failure("Process group exited, but Yard could not verify port release")
+        }
+        if port_listener(remaining["processes"], port) != null {
+            return failure("Process group exited, but port ${port} is still occupied")
+        }
+        if action == "stop" {
+            return {"ok": true, "error": null, "signal": signal}
         }
     }
-    if type(pid) == "int" {
-        # Recheck the configured port after waiting for the old process.
-        scan = scan_listeners()
-        if scan["ok"] == false {
-            return failure(scan["error"])
-        }
-        if len(listener_pids(scan["processes"], svc["port"], null)) > 0 {
-            return failure("port ${svc["port"]} is still in use; inspect listeners before retrying")
-        }
-    }
-    return launch(svc, cwd, log_file, state, entry, true)
+    return launch(svc, state, entry, action == "restart")
 }
 
-func launch(svc, cwd, log_file, state, entry, restarting) {
+func launch(svc, state, previous, restarting) {
     id := svc["id"]
-    log_abs := absolute_path(log_file)
-    # Open the log and enter cwd before reporting a PID. Redirect stdin too,
-    # so the service never inherits a caller's terminal or HTTP request pipe.
-    script := "cd " + shell_quote(absolute_path(cwd)) + " || exit 1; "
-    script = script + "exec 3>" + shell_quote(log_abs) + " || exit 1; "
-    script = script + "exec nohup " + svc["start"] + " < /dev/null >&3 2>&1 3>&- & echo $!"
-    started := execute_status(script)
-    pid := parse_int(trim(started.stdout))
-    if started.exitcode != 0 || type(pid) != "int" || pid <= 0 {
-        return failure("could not launch '${id}': ${trim(started.stderr)}")
+    count := get(previous, "restart_count")
+    if type(count) != "int" {
+        count = 0
     }
-    identity := process_identity(pid)
-    if identity["error"] != null || identity["started"] == null {
-        return failure("could not verify launch of '${id}' (pid ${pid}); check ${log_file}")
+    log := absolute_path(join_path(state_dir(), "private-logs/${id}.log"))
+    spec := {
+        "socket": reveal(secure_random_token(24)) + ".sock",
+        "token": reveal(secure_random_token(32)),
+        "control_dir": absolute_path(join_path(state_dir(), "control")),
+        "log": log,
+        "cwd": absolute_path(svc["cwd"]),
+        "start": svc["start"],
+        "port": svc["port"],
+        "executable": svc["executable"],
+        "env": svc["env"],
+        "shutdown_timeout": svc["shutdown_timeout"]
     }
-
-    count := 0
-    if type(entry) == "dict" && type(get(entry, "restart_count")) == "int" {
-        count = entry["restart_count"]
+    entry := {"supervisor": spec, "started_at": iso_now(), "restart_count": count, "outcome": "starting", "error": null}
+    state[id] := entry
+    save_state(state)
+    started := supervisor("launch", spec, 2500)
+    if started["ok"] == false {
+        return record_failure(state, id, entry, started["error"])
     }
-    if restarting {
-        count = count + 1
-    }
-    state[id] := new_entry(pid, identity["started"], log_file, svc["start"], count)
-    mut save_error := null
-    try {
-        if save_state(state) != true {
-            save_error = "atomic write failed"
+    pid := started["receipt"]["pid"]
+    entry["pid"] := pid
+    entry["child"] := started["receipt"]["child"]
+    state[id] := entry
+    save_state(state)
+    deadline := current_timestamp() + svc["startup_timeout"] * 1000
+    mut tries := 0
+    mut health := "unknown"
+    while current_timestamp() < deadline {
+        live := supervisor("status", spec, 1300)
+        if live["ok"] == false || live["receipt"] == null {
+            return record_failure(state, id, entry, "Startup command exited or ownership could not be verified. Check recent logs.")
         }
-    } except e {
-        save_error = "${e}"
-    }
-    if save_error != null {
-        rollback := signal_process(pid, identity["started"], false)
-        if rollback["ok"] {
-            return failure("could not save state for '${id}' (sent TERM to pid ${pid}): ${save_error}")
-        }
-        return failure("could not save state for '${id}' or stop pid ${pid}: ${save_error}; ${rollback["error"]}")
-    }
-    return {"ok": true, "error": null, "pid": pid, "log_file": log_file}
-}
-
-# Select exact PIDs for the requested port or PID. A failed scan must never
-# authorize a signal, and all selected listeners are checked before signaling.
-export func control_listeners(services, port, requested_pid, force, confirm) {
-    scan := scan_listeners()
-    if scan["ok"] == false {
-        return failure(scan["error"])
-    }
-    listeners := scan["processes"]
-    targets := listener_pids(listeners, port, requested_pid)
-    if len(targets) == 0 {
-        if type(requested_pid) == "int" {
-            return failure("pid ${requested_pid} is not a detected TCP listener")
-        }
-        return {"ok": true, "error": null, "stopped": [], "signal": "none"}
-    }
-
-    mut identities := {}
-    mut sensitive := false
-    for pid in targets {
-        identity := process_identity(pid)
-        if identity["error"] != null {
-            return failure(identity["error"])
-        }
-        identities["${pid}"] := identity["started"]
-        if listener_sensitive(listeners, services, pid) {
-            sensitive = true
-        }
-    }
-    guard := confirmation(sensitive, force, confirm)
-    if guard != null {
-        return guard
-    }
-
-    mut stopped := []
-    mut result := {"ok": true, "error": null, "signal": "none"}
-    for pid in targets {
-        result = signal_process(pid, identities["${pid}"], force)
-        if result["ok"] == false {
-            break
-        }
-        stopped = push(stopped, pid)
-    }
-    result["stopped"] := stopped
-    return result
-}
-
-func listener_pids(listeners, port, requested_pid) {
-    mut seen := {}
-    mut targets := []
-    for listener in listeners {
-        pid := listener["pid"]
-        key := "${pid}"
-        if (port == listener["port"] || requested_pid == pid) && has_key(seen, key) == 0 {
-            seen[key] := true
-            targets = push(targets, pid)
-        }
-    }
-    return targets
-}
-
-func listener_sensitive(listeners, services, pid) {
-    cmd := full_command(pid)
-    if is_sensitive(null, cmd) {
-        return true
-    }
-    for listener in listeners {
-        if listener["pid"] == pid {
-            service := service_for_port(services, listener["port"])
-            if sensitive_listener(listener, service, cmd) {
-                return true
+        ready := svc["port"] == null
+        if ready == false {
+            scan := scan_listeners()
+            table := groups()
+            for listener in scan["processes"] {
+                if listener["port"] == svc["port"] && get(table, "${listener["pid"]}") == pid {
+                    ready = true
+                }
             }
         }
+        if ready {
+            health = service_health(svc, svc["probe_timeout_ms"] / 1000.0)["status"]
+            if health == "healthy" || health == "process" || health == "not_checked" {
+                if tries > 0 {
+                    entry["outcome"] := "running"
+                    entry["health"] := health
+                    if restarting {
+                        entry["restart_count"] := count + 1
+                    }
+                    state[id] := entry
+                    save_state(state)
+                    return {"ok": true, "error": null, "pid": pid, "log_file": log, "note": "Readiness confirmed (${health})"}
+                }
+            }
+        }
+        tries = tries + 1
+        sleep(150)
     }
-    return false
+    return record_failure(state, id, entry, "Readiness deadline expired (health: ${health}). Check logs and the configured port or endpoint.")
 }
 
-func confirmation(sensitive, force, confirm) {
-    if truthy(confirm) {
-        return null
-    }
-    if truthy(force) {
-        return {"ok": false, "needs_confirm": true, "error": "force stop requires explicit confirmation"}
-    }
-    if sensitive {
-        return {"ok": false, "needs_confirm": true, "error": "controlling a sensitive service requires explicit confirmation"}
+func record_failure(state, id, entry, message) {
+    entry["outcome"] := "failed"
+    entry["error"] := message
+    state[id] := entry
+    save_state(state)
+    return failure(message)
+}
+
+func port_listener(listeners, port) {
+    for listener in listeners {
+        if listener["port"] == port {
+            return listener
+        }
     }
     return null
 }
 
-func signal_process(pid, expected, force) {
-    if expected == null {
-        return gone(pid)
-    }
-    current := process_identity(pid)
-    if current["error"] != null {
-        return failure(current["error"])
-    }
-    if current["started"] != expected {
-        return gone(pid)
-    }
-    signal := "TERM"
-    if truthy(force) {
-        signal = "KILL"
-    }
-    r := execute_status("kill -${signal} ${pid}")
-    if r.exitcode != 0 {
-        return {"ok": false, "error": trim(r.stderr), "signal": signal}
-    }
-    return {"ok": true, "error": null, "signal": signal}
+# Preserve old command/route names as an explicit safe failure.
+export func control_listeners(services, port, requested_pid, force, confirm) {
+    return failure("External listeners are read-only. Stop the application from its own launcher.")
 }
 
-func wait_for_exit(pid, expected) {
-    mut attempt := 0
-    while attempt <= 20 {
-        identity := process_identity(pid)
-        if identity["error"] != null {
-            return identity["error"]
-        }
-        if identity["started"] != expected {
-            return null
-        }
-        if attempt < 20 {
-            sleep(100)
-        }
-        attempt = attempt + 1
-    }
-    return "pid ${pid} is still running after SIGTERM; restart did not launch a replacement"
-}
-
-func gone(pid) {
-    return {"ok": true, "error": null, "signal": "none", "note": "process ${pid} was already gone"}
-}
-
-func failure(message) {
+export func failure(message) {
     return {"ok": false, "error": message}
-}
-
-func absolute_path(path) {
-    if starts_with(path, "/") {
-        return path
-    }
-    return join_path(os_getcwd(), path)
 }

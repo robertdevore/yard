@@ -10,7 +10,7 @@ from src.util import truthy, iso_now, shell_quote
 
 # Root state directory: $YARD_DIR or ./.yard in the working directory.
 export func state_dir() {
-    return env_or("YARD_DIR", ".yard")
+    return env_or("YARD_DIR", join_path(env_or("HOME", "."), ".config/yard/state"))
 }
 
 export func logs_dir() {
@@ -30,7 +30,10 @@ export func log_path(id) {
 export func ensure_dirs() {
     sd := state_dir()
     if path_is_dir(sd) == false {
-        create_dir(sd)
+        r := execute_status("umask 077; mkdir -p -- " + shell_quote(sd))
+        if r.exitcode != 0 {
+            throw("could not create state directory")
+        }
     }
     ld := logs_dir()
     if path_is_dir(ld) == false {
@@ -71,23 +74,16 @@ export func get_entry(state, id) {
     return null
 }
 
-# A fresh entry for a service Yard has just started.
-export func new_entry(pid, process_started, log_file, start_cmd, restart_count) {
-    return {
-        "pid": pid,
-        "process_started": process_started,
-        "started_at": iso_now(),
-        "restart_count": restart_count,
-        "log_file": log_file,
-        "start_cmd": start_cmd,
-        "managed_by_yard": true
-    }
-}
-
 # Bound the data read and returned even when the active log has grown large.
 # Reading a suffix may split its first line, which is discarded when clipped.
 export func read_logs(id, max_lines) {
-    p := log_path(id)
+    p := join_path(state_dir(), "private-logs/${id}.log")
+    if file_exists(p) == false {
+        p = log_path(id)
+    }
+    if execute_status("test -L " + shell_quote(p) + " || test -L " + shell_quote(dirname(p))).exitcode == 0 {
+        throw("service log must not be a symbolic link")
+    }
     if file_exists(p) == false || max_lines <= 0 {
         return {"lines": [], "truncated": false}
     }

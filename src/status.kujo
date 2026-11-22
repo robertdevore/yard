@@ -1,271 +1,183 @@
-# Yard :: status
-#
-# Composition layer. It fuses the four inputs — detected listeners, the managed
-# config, Yard's start-state, and health probes — into the ServiceStatus list
-# the API and UI consume, plus a summary. This is where "managed vs unknown",
-# "sensitive", "which actions are safe", and "is this managed listener tracked
-# by Yard" are all decided. It performs read-only inspection only.
-
-from src.util import truthy
-from src.ports import scan, full_command, process_identity
+# Compose registered services, listeners and verified supervisor receipts.
+from src.ports import scan
 from src.knownports import known_label, is_sensitive, infer_kind, sensitive_listener
-from src.health import check, skipped
 from src.state import load_state, get_entry
+from src.supervisor import supervisor
+from src.health import probe_target, probe_result, batch_health, passive_health, skipped
+from src.config import service_for_port
 
-# Build the full ServiceStatus list. `do_health` gates the (slower) HTTP probes
-# so callers can ask for a fast structural view. Returns:
-#   { "ok": bool, "scan_error": str|null, "services": [ServiceStatus...] }
 export func build_services(config, do_health, health_timeout_secs, server_port) {
-    services_cfg := config["services"]
     scan_result := scan()
-    detected := scan_result["processes"]
     state := load_state()
-
-    mut statuses := []
-    mut services_by_port := {}
-    mut commands_by_pid := {}
-    mut seen_ports := {}
-    mut sensitive_pids := {}
-    for service in services_cfg {
-        services_by_port["${service["port"]}"] := service
-    }
-    for listener in detected {
-        pid_key := "${listener["pid"]}"
-        if truthy(has_key(commands_by_pid, pid_key)) == false {
-            commands_by_pid[pid_key] := full_command(listener["pid"])
+    mut specs := {}
+    for svc in config["services"] {
+        spec := get(get_entry(state, svc["id"]), "supervisor")
+        if type(spec) == "dict" {
+            specs[svc["id"]] := spec
         }
     }
+    snapshot := supervisor("snapshot", {"entries": specs}, 2000)
+    processes := get(get(snapshot, "receipt"), "processes", {})
+    owned := get(get(snapshot, "receipt"), "owned", {})
+    mut sensitive_groups := {}
     for listener in scan_result["listeners"] {
-        pid_key := "${listener["pid"]}"
-        if has_key(commands_by_pid, pid_key) == 0 || has_key(sensitive_pids, pid_key) == 1 {
-            continue
-        }
-        service := get(services_by_port, "${listener["port"]}")
-        if sensitive_listener(listener, service, commands_by_pid[pid_key]) {
-            sensitive_pids[pid_key] := true
+        process := get(processes, "${listener["pid"]}")
+        group := get(process, "group")
+        svc := service_for_port(config["services"], listener["port"])
+        if group != null && sensitive_listener(listener, svc, get(process, "executable")) {
+            sensitive_groups["${group}"] := true
         }
     }
-    for listener in detected {
-        port_key := "${listener["port"]}"
-        pid_key := "${listener["pid"]}"
-        seen_ports[port_key] := true
-        statuses = push(statuses, status_for_detected(listener, get(services_by_port, port_key), state, commands_by_pid[pid_key], has_key(sensitive_pids, pid_key) == 1, do_health, health_timeout_secs, server_port))
+    mut by_port := {}
+    for listener in scan_result["processes"] {
+        by_port["${listener["port"]}"] := listener
+    }
+    mut statuses := []
+    mut targets := {}
+    mut services := {}
+    for svc in config["services"] {
+        id := svc["id"]
+        services[id] := svc
+        listener := get(by_port, "${svc["port"]}")
+        receipt := get(owned, id)
+        # Prefer any listener in the verified group when the displayed port
+        # has more than one address or owner.
+        if receipt != null && svc["port"] != null {
+            listener = null
+            for candidate in scan_result["listeners"] {
+                cp := get(processes, "${candidate["pid"]}")
+                if candidate["port"] == svc["port"] && get(cp, "group") == receipt["pid"] {
+                    listener = candidate
+                    break
+                }
+            }
+        }
+        status := registered(svc, listener, receipt, get_entry(state, id), processes, sensitive_groups, scan_result["ok"] && snapshot["ok"])
+        if do_health && status["state"] == "running" && status["sensitive"] == false {
+            target := probe_target(svc, server_port)
+            if target != null {
+                targets[id] := target
+            }
+        }
+        statuses = push(statuses, status)
+    }
+    answers := batch_health(targets)
+    mut output := []
+    for status in statuses {
+        id := status["id"]
+        if has_key(targets, id) == 1 {
+            health := probe_result(get(answers, id), services[id])
+            status["health_status"] := health["status"]
+            status["http_status"] := health["http_status"]
+            status["response_ms"] := health["response_ms"]
+        }
+        output = push(output, status)
+    }
+    for listener in scan_result["processes"] {
+        if service_for_port(config["services"], listener["port"]) == null {
+            output = push(output, unidentified(listener, processes, sensitive_groups))
+        }
     }
 
-    for service in services_cfg {
-        if truthy(has_key(seen_ports, "${service["port"]}")) == false {
-            statuses = push(statuses, status_for_stopped(service))
-        }
-    }
-
-    return {"ok": scan_result["ok"], "scan_error": scan_result["error"], "services": statuses}
+    return {"ok": scan_result["ok"], "scan_error": scan_result["error"], "services": output}
 }
 
-# Build a ServiceStatus for a port we actually saw listening.
-func status_for_detected(p, svc, state, cmd, sensitive, do_health, health_timeout_secs, server_port) {
-    port := p["port"]
-    pid := p["pid"]
-    process_name := p["process_name"]
-    cmd_text := process_name
-    if type(cmd) != "null" {
-        cmd_text = cmd
-    }
-
-    managed := type(svc) == "dict"
-    url := inferred_url(port, p["address"], p["ip_version"])
-    open_url := url
-    if managed && type(svc["open"]) != "null" {
-        open_url = svc["open"]
-    }
-
-    # Ownership: did Yard start the process now on this port?
-    entry := managed_entry(state, svc, managed)
-    owned := false
-    started_at := null
-    restart_count := 0
-    if type(entry) == "dict" {
-        if get(entry, "pid") == pid && type(get(entry, "process_started")) == "string" {
-            identity := process_identity(pid)
-            owned = identity["started"] == entry["process_started"]
-        }
-        started_at = get(entry, "started_at")
-        if type(get(entry, "restart_count")) == "int" {
-            restart_count = entry["restart_count"]
-        }
-    }
-    # A managed listener can be healthy and correct without having been started
-    # by Yard. Call that state untracked; it is not evidence of a port conflict.
-    untracked := managed && (owned == false)
-
-    health := health_for(svc, managed, sensitive, url, do_health, health_timeout_secs, server_port)
-
-    name := process_name
-    group := "Unknown"
-    has_start := false
-    sid := null
-    description := null
-    if managed {
-        name = svc["name"]
-        group = svc["group"]
-        has_start = type(svc["start"]) != "null" && "${svc["start"]}" != ""
-        sid = svc["id"]
-        description = svc["description"]
-    }
-
-    return {
-        "id": sid,
-        "name": name,
-        "group": group,
-        "port": port,
-        "url": url,
-        "open_url": open_url,
-        "managed": managed,
-        "sensitive": sensitive,
-        "untracked": untracked,
-        "owned_by_yard": owned,
-        "pid": pid,
-        "command": cmd_text,
-        "process_name": process_name,
-        "user": p["user"],
-        "address": p["address"],
-        "ip_version": p["ip_version"],
-        "known_label": known_label(port),
-        "kind": infer_kind(port, cmd_text),
-        "description": description,
-        "started_at": started_at,
-        "restart_count": restart_count,
-        "health_status": health["status"],
-        "http_status": health["http_status"],
-        "response_ms": health["response_ms"],
-        "state": "running",
-        "actions": actions_for(managed, has_start, true)
-    }
-}
-
-# Build a ServiceStatus for a managed service that is configured but not running.
-func status_for_stopped(svc) {
+func registered(svc, listener, owned, entry, processes, sensitive_groups, trustworthy) {
     port := svc["port"]
-    sensitive := truthy(svc["sensitive"]) || is_sensitive(port, svc["start"])
-    has_start := type(svc["start"]) != "null" && "${svc["start"]}" != ""
-    url := inferred_url(port, "127.0.0.1", "IPv4")
-    open_url := url
-    if type(svc["open"]) != "null" {
-        open_url = svc["open"]
+    pid := get(listener, "pid", get(owned, "child"))
+    group := get(owned, "pid")
+    process := get(processes, "${pid}")
+    sensitive := svc["sensitive"] || is_sensitive(port, svc["start"]) || has_key(sensitive_groups, "${group}") == 1
+    if listener != null && sensitive_listener(listener, svc, get(process, "executable")) {
+        sensitive = true
     }
-    return {
-        "id": svc["id"],
-        "name": svc["name"],
-        "group": svc["group"],
-        "port": port,
-        "url": url,
-        "open_url": open_url,
-        "managed": true,
-        "sensitive": sensitive,
-        "untracked": false,
-        "owned_by_yard": false,
-        "pid": null,
-        "command": null,
-        "process_name": null,
-        "user": null,
-        "address": null,
-        "ip_version": null,
-        "known_label": known_label(port),
-        "kind": infer_kind(port, svc["start"]),
-        "description": svc["description"],
-        "started_at": null,
-        "restart_count": 0,
-        "health_status": "unknown",
-        "http_status": null,
-        "response_ms": null,
-        "state": "stopped",
-        "actions": actions_for(true, has_start, false)
+    has_start := svc["enabled"] && type(svc["start"]) == "string" && trim(svc["start"]) != ""
+    state := "stopped"
+    diagnostic := get(entry, "error")
+    if trustworthy == false {
+        state = "unknown"
+        diagnostic = "Listener or process identity inspection was incomplete."
     }
-}
-
-func managed_entry(state, svc, managed) {
-    if managed == false {
-        return null
-    }
-    return get_entry(state, svc["id"])
-}
-
-# Choose a health probe strategy. Sensitive services are never probed over HTTP.
-func health_for(svc, managed, sensitive, url, do_health, health_timeout_secs, server_port) {
-    if do_health == false {
-        return skipped("unknown")
-    }
-    if sensitive {
-        return skipped("not_http")
-    }
-    target := url
-    if managed && type(svc["health"]) != "null" && "${svc["health"]}" != "" {
-        target = svc["health"]
-    }
-    return check(target, health_timeout_secs)
-}
-
-func points_to_yard(url, port) {
-    if type(url) != "string" {
-        return false
-    }
-    parts := split(to_lower(url), "/")
-    if len(parts) < 3 || (parts[0] != "http:" && parts[0] != "https:") {
-        return false
-    }
-    host := split(split(parts[2], "?")[0], "#")[0]
-    return host == "127.0.0.1:${port}" || host == "localhost:${port}" || host == "[::1]:${port}" || host == "0.0.0.0:${port}"
-}
-
-# A wildcard listener is reachable on the loopback of its address family.
-func inferred_url(port, address, ip_version) {
-    host := "${address}"
-    if host == "*" || host == "" {
-        host = "127.0.0.1"
-        if ip_version == "IPv6" {
-            host = "[::1]"
+    if owned != null {
+        state = "running"
+        if get(owned, "stopping") {
+            state = "stopping"
+        } else {
+            if port != null && listener == null {
+                state = "starting"
+                if get(entry, "outcome") == "failed" {
+                    state = "failed"
+                }
+            }
+        }
+    } else {
+        if listener != null {
+            state = "running"
+            diagnostic = "This listener is running outside Yard or its ownership could not be verified."
+        } else {
+            if get(entry, "outcome") == "running" || get(entry, "outcome") == "starting" {
+                state = "failed"
+                diagnostic = "The supervised process exited unexpectedly. Check recent logs."
+            }
+            if get(entry, "outcome") == "failed" {
+                state = "failed"
+            }
         }
     }
-    if host == "0.0.0.0" {
-        host = "127.0.0.1"
+    url := null
+    if port != null {
+        url = "http://127.0.0.1:${port}"
     }
-    if host == "::" || host == "[::]" {
-        host = "[::1]"
+    open := svc["open"]
+    if open == null && svc["health_type"] == "http" {
+        open = url
     }
-    if truthy(contains(host, ":")) && substring(host, 0, 1) != "[" {
-        host = "[" + host + "]"
-    }
-    return "http://${host}:${port}"
-}
-
-# The UI offers log reads for managed services and restart only when a
-# running managed service has a start command. The API validates actions
-# again against current listener and process state.
-func actions_for(managed, has_start, running) {
-    can_restart := managed && has_start
-    is_unknown := managed == false
-    if running {
-        return {
-            "open": true,
-            "copy": true,
-            "start": false,
-            "stop": true,
-            "force_stop": true,
-            "restart": can_restart,
-            "logs": managed,
-            "inspect": true,
-            "claim": is_unknown
+    health := skipped("unknown")
+    if state == "running" {
+        if owned != null || svc["health_type"] != "process" {
+            health = passive_health(svc)
+        }
+        if sensitive {
+            health = skipped("not_http")
         }
     }
     return {
-        "open": false,
-        "copy": true,
-        "start": can_restart,
-        "stop": false,
-        "force_stop": false,
-        "restart": false,
-        "logs": managed,
-        "inspect": true,
-        "claim": false
+        "id": svc["id"], "name": svc["name"], "group": svc["group"], "favorite": svc["favorite"],
+        "port": port, "url": url, "open_url": open, "description": svc["description"],
+        "managed": true, "enabled": svc["enabled"], "sensitive": sensitive,
+        "untracked": (listener != null && owned == null), "owned_by_yard": (owned != null),
+        "pid": pid, "process_group": group, "parent_pid": get(process, "parent"),
+        "command": get(process, "executable"), "process_name": get(listener, "process_name"),
+        "user": get(listener, "user"), "address": get(listener, "address"),
+        "ip_version": get(listener, "ip_version"), "known_label": known_label(port),
+        "kind": infer_kind(port, get(process, "executable")), "state": state, "diagnostic": diagnostic,
+        "started_at": get(entry, "started_at"), "restart_count": get(entry, "restart_count", 0),
+        "health_status": health["status"], "http_status": null, "response_ms": null,
+        "actions": {
+            "open": (state == "running" && open != null), "copy": (open != null),
+            "start": (has_start && owned == null && listener == null && trustworthy),
+            "stop": (owned != null), "force_stop": (owned != null && sensitive == false),
+            "restart": (has_start && owned != null && state != "stopping"),
+            "logs": true, "inspect": true, "claim": false
+        }
+    }
+}
+
+func unidentified(listener, processes, sensitive_groups) {
+    pid := listener["pid"]
+    port := listener["port"]
+    process := get(processes, "${pid}")
+    group := get(process, "group")
+    executable := get(process, "executable")
+    sensitive := has_key(sensitive_groups, "${group}") == 1 || sensitive_listener(listener, null, executable)
+    return {
+        "id": null, "name": listener["process_name"], "group": "Unknown", "port": port,
+        "managed": false, "sensitive": sensitive, "untracked": false, "owned_by_yard": false,
+        "pid": pid, "parent_pid": get(process, "parent"), "command": executable,
+        "process_name": listener["process_name"], "user": listener["user"], "address": listener["address"],
+        "ip_version": listener["ip_version"], "known_label": known_label(port), "kind": infer_kind(port, executable),
+        "state": "running", "health_status": "not_checked", "http_status": null, "response_ms": null,
+        "actions": {"inspect": true, "claim": true}
     }
 }
 

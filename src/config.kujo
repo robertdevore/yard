@@ -14,7 +14,7 @@ export func resolve_path(explicit) {
     if type(explicit) != "null" && "${explicit}" != "" {
         return expand_home("${explicit}")
     }
-    return expand_home(env_or("YARD_CONFIG", "yard.config.json"))
+    return expand_home(env_or("YARD_CONFIG", join_path(env_or("HOME", "."), ".config/yard/yard.config.json")))
 }
 
 # Load and validate the config at `path`. Always returns a structured result:
@@ -28,7 +28,8 @@ export func load(path) {
         "exists": false,
         "services": [],
         "errors": [],
-        "warnings": []
+        "warnings": [],
+        "raw": {"services": []}
     }
     if file_exists(path) == false {
         return result
@@ -54,6 +55,7 @@ export func load(path) {
         return result
     }
 
+    result["raw"] := parsed
     raw_services := extract_services(parsed)
     if type(raw_services) != "array" {
         result["errors"] := push(result["errors"], "config 'services' must be an array")
@@ -61,14 +63,26 @@ export func load(path) {
     }
 
     validated := validate_services(raw_services)
-    result["services"] := validated["services"]
+    mut services := []
+    for service in validated["services"] {
+        cwd := service["cwd"]
+        if cwd == null {
+            cwd = "."
+        }
+        if starts_with(cwd, "/") == false {
+            cwd = join_path(dirname(path), cwd)
+        }
+        service["cwd"] := cwd
+        services = push(services, service)
+    }
+    result["services"] := services
     result["errors"] := concat_lists(result["errors"], validated["errors"])
     result["warnings"] := concat_lists(result["warnings"], validated["warnings"])
     return result
 }
 
 # Accept either {"services": [...]} or a bare top-level array of services.
-func extract_services(parsed) {
+export func extract_services(parsed) {
     if type(parsed) == "array" {
         return parsed
     }
@@ -90,7 +104,7 @@ func concat_lists(a, b) {
 }
 
 # Validate the raw service entries, normalizing fields and collecting problems.
-func validate_services(raw_services) {
+export func validate_services(raw_services) {
     mut services := []
     mut errors := []
     mut warnings := []
@@ -115,20 +129,22 @@ func validate_services(raw_services) {
             errors = push(errors, "service #${idx} has an invalid 'id' (use letters, numbers, dot, underscore, or hyphen)")
             continue
         }
-        if truthy(has_key(entry, "port")) == false {
-            errors = push(errors, "service '${id}' is missing required 'port'")
+        port_value := get(entry, "port")
+        port := normalize_port(port_value)
+        if port_value != null && type(port) != "int" {
+            errors = push(errors, "service '${id}' has an invalid 'port' (must be 1-65535)")
             continue
         }
-        port := normalize_port(entry["port"])
-        if type(port) != "int" {
-            errors = push(errors, "service '${id}' has an invalid 'port' (must be 1-65535)")
+        problem := validate_fields(entry, port)
+        if problem != null {
+            errors = push(errors, "Service '${id}': ${problem}")
             continue
         }
         if includes(seen_ids, id) {
             warnings = push(warnings, "duplicate service id '${id}' (later entry ignored)")
             continue
         }
-        if includes(seen_ports, port) {
+        if port != null && includes(seen_ports, port) {
             warnings = push(warnings, "duplicate configured port ${port} (service '${id}' ignored)")
             continue
         }
@@ -174,7 +190,7 @@ func numeric_string(value) {
 }
 
 func valid_id(id) {
-    if id == "" || id == "." || id == ".." {
+    if id == "" || id == "." || id == ".." || len(id) > 80 {
         return false
     }
     allowed := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
@@ -199,6 +215,16 @@ func normalize_service(entry, id, port) {
         "group": opt(entry, "group", "Ungrouped"),
         "port": port,
         "cwd": expand_home(opt(entry, "cwd", null)),
+        "favorite": bool_opt(entry, "favorite", false),
+        "enabled": bool_opt(entry, "enabled", true),
+        "runtime": opt(entry, "runtime", null),
+        "executable": opt(entry, "executable", null),
+        "env": list_opt(entry, "env"),
+        "health_type": opt(entry, "health_type", default_health(entry, port)),
+        "probe_timeout_ms": opt(entry, "probe_timeout_ms", 400),
+        "expected_status": opt(entry, "expected_status", null),
+        "startup_timeout": opt(entry, "startup_timeout", 3),
+        "shutdown_timeout": opt(entry, "shutdown_timeout", 3),
         "start": opt(entry, "start", null),
         "stop": opt(entry, "stop", null),
         "health": opt(entry, "health", null),
@@ -242,7 +268,7 @@ export func service_for_port(services, port) {
     mut sfp_i := 0
     sfp_n := len(services)
     while sfp_i < sfp_n {
-        if services[sfp_i]["port"] == port {
+        if port != null && services[sfp_i]["port"] == port {
             return services[sfp_i]
         }
         sfp_i = sfp_i + 1
@@ -259,6 +285,83 @@ export func service_by_id(services, id) {
             return services[sbi_i]
         }
         sbi_i = sbi_i + 1
+    }
+    return null
+}
+
+
+from src.health import local_health_url
+from src.util import is_http_url
+
+func default_health(entry, port) {
+    if get(entry, "health") != null {
+        return "http"
+    }
+    if port != null {
+        return "tcp"
+    }
+    return "process"
+}
+
+func validate_fields(entry, port) {
+    for key in ["name", "group", "cwd", "start", "stop", "health", "open", "description", "runtime", "executable", "health_type"] {
+        val := get(entry, key)
+        if val != null && (type(val) != "string" || len(val) > 8192) {
+            return "'${key}' must be a string of at most 8192 characters"
+        }
+    }
+    for key in ["enabled", "favorite", "sensitive"] {
+        val := get(entry, key)
+        if val != null && type(val) != "bool" {
+            return "'${key}' must be true or false"
+        }
+    }
+    for key in ["startup_timeout", "shutdown_timeout"] {
+        val := get(entry, key)
+        if val != null && (type(val) != "int" || val < 1 || val > 10) {
+            return "'${key}' must be 1–10 seconds"
+        }
+    }
+    open_url := get(entry, "open")
+    if open_url != null && is_http_url(open_url) == false {
+        return "Open URL must use HTTP or HTTPS"
+    }
+    health := get(entry, "health")
+    if health != null && local_health_url(health) == false {
+        return "Health URL must use HTTP(S) on localhost, 127.0.0.1, or [::1]"
+    }
+    kind := opt(entry, "health_type", default_health(entry, port))
+    if includes(["http", "tcp", "process", "none"], kind) == false {
+        return "Health check must be HTTP, TCP, Process, or None"
+    }
+    if (kind == "http" && health == null) || (kind == "tcp" && port == null) {
+        return "HTTP needs a health URL and TCP needs a port"
+    }
+    timeout := get(entry, "probe_timeout_ms")
+    if timeout != null && (type(timeout) != "int" || timeout < 100 || timeout > 800) {
+        return "Probe timeout must be 100–800 milliseconds"
+    }
+    expected := get(entry, "expected_status")
+    if expected != null && (type(expected) != "int" || expected < 100 || expected > 599 || kind != "http") {
+        return "Expected HTTP status must be 100–599 and requires an HTTP check"
+    }
+    executable := get(entry, "executable")
+    if executable != null && (executable == "" || starts_with(executable, "-") || regex_match(executable, "[[:space:]]")) {
+        return "Required executable must be a command name or a path without spaces"
+    }
+    refs := get(entry, "env")
+    if refs != null {
+        if type(refs) != "array" || len(refs) > 32 {
+            return "Environment references must be a list of up to 32 names"
+        }
+        for name in refs {
+            if type(name) != "string" || regex_match(name, "^[A-Za-z_][A-Za-z0-9_]{0,127}$") == false {
+                return "Environment references accept variable names only"
+            }
+        }
+    }
+    if port == null && get(entry, "start") == null {
+        return "A service needs a port or a startup command"
     }
     return null
 }

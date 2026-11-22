@@ -1,0 +1,36 @@
+# The helper owns POSIX session operations. Control requests use only the address
+# and capability saved before launch, never a PID supplied by a client.
+export func supervisor(action, spec, timeout) {
+    try {
+        helper := env_or("YARD_SUPERVISOR", "bin/supervisor.py")
+        r := spawn_process(["python3", helper, action, to_json(spec)], {"timeout_ms": timeout, "max_output_bytes": 262144})
+        if r.timed_out {
+            return {"ok": false, "error": "Yard supervisor did not respond before the deadline"}
+        }
+        if trim(r.stdout) == "" {
+            return {"ok": false, "error": "Could not run Yard's Python 3 supervisor"}
+        }
+        return parse_json(r.stdout)
+    } except e {
+        return {"ok": false, "error": "Could not run Yard's Python 3 supervisor"}
+    }
+}
+
+export func absolute_path(path) {
+    if starts_with(path, "/") {
+        return path
+    }
+    return join_path(os_getcwd(), path)
+}
+
+export func groups() {
+    r := supervisor("groups", {}, 1500)
+    if r["ok"] {
+        return r["receipt"]
+    }
+    return {}
+}
+
+export func group_live(table, pid) {
+    return type(pid) == "int" && get(table, "${pid}") == pid
+}

@@ -9,32 +9,8 @@
 #
 # Status vocabulary: healthy | unhealthy | timeout | not_http | unknown.
 
-from src.util import to_ms, is_http_url
-
-# Probe `url` with a hard timeout (seconds). Returns:
-#   { "status": str, "http_status": int|null, "response_ms": int|null }
-export func check(url, timeout_secs) {
-    if is_http_url(url) == false {
-        return result("unknown", null, null)
-    }
-    secs := parse_float("${timeout_secs}")
-    if (type(secs) != "float" && type(secs) != "int") || secs <= 0 || secs > 60 {
-        return result("unknown", null, null)
-    }
-    mut r := null
-    try {
-        r = spawn_process(
-            ["curl", "-q", "-g", "-s", "-o", "/dev/null", "-w", "%{http_code} %{time_total}", "--proto", "=http,https", "--max-time", "${secs}", "--", url],
-            {"timeout_ms": to_ms(secs) + 1000, "max_output_bytes": 4096}
-        )
-    } except e {
-        return result("unknown", null, null)
-    }
-    if r.timed_out {
-        return result("timeout", null, null)
-    }
-    return interpret(r.exitcode, r.stdout)
-}
+from src.util import to_ms, last_segment
+from src.supervisor import supervisor
 
 # Map a curl exit code + "<http_code> <time_total>" output line into a health
 # result. Exposed for unit testing without invoking curl.
@@ -84,4 +60,82 @@ func result(status, http_status, response_ms) {
 # A non-probing result for services we choose not to hit over HTTP.
 export func skipped(reason) {
     return {"status": reason, "http_status": null, "response_ms": null}
+}
+
+export func service_health(svc, timeout_secs) {
+    target := probe_target(svc, parse_int(env_or("YARD_ACTIVE_PORT", env_or("YARD_PORT", "9753"))))
+    if target == null {
+        return passive_health(svc)
+    }
+    target["timeout"] := timeout_secs
+    answer := batch_health({"service": target})
+    return probe_result(get(answer, "service"), svc)
+}
+
+export func passive_health(svc) {
+    if svc["health_type"] == "process" {
+        return skipped("process")
+    }
+    return skipped("not_checked")
+}
+
+export func probe_target(svc, server_port) {
+    kind := svc["health_type"]
+    if kind == "tcp" && svc["port"] != null && svc["port"] != server_port {
+        return {"kind": "tcp", "port": svc["port"], "timeout": svc["probe_timeout_ms"] / 1000.0}
+    }
+    target := svc["health"]
+    if kind == "http" && local_health_url(target) {
+        authority := split(split(split(target, "/")[2], "?")[0], "#")[0]
+        port := 80
+        if starts_with(target, "https:") {
+            port = 443
+        }
+        if regex_match(authority, ":[0-9]+$") {
+            port = parse_int(last_segment(authority, ":"))
+        }
+        if port != server_port {
+            return {"kind": "http", "url": target, "timeout": svc["probe_timeout_ms"] / 1000.0}
+        }
+    }
+    return null
+}
+
+export func batch_health(targets) {
+    if len(keys(targets)) == 0 {
+        return {}
+    }
+    answer := supervisor("health", targets, 2300)
+    if answer["ok"] {
+        return answer["receipt"]
+    }
+    return {}
+}
+
+export func probe_result(raw, svc) {
+    if type(raw) != "dict" {
+        return skipped("pending")
+    }
+    if get(raw, "status") != null {
+        return result(raw["status"], null, get(raw, "response_ms"))
+    }
+    answer := interpret(raw["exitcode"], raw["stdout"])
+    if raw["exitcode"] == 7 {
+        answer["status"] := "connection_failed"
+    }
+    expected := svc["expected_status"]
+    if expected != null && answer["http_status"] != null {
+        answer["status"] := "unhealthy"
+        if answer["http_status"] == expected {
+            answer["status"] := "healthy"
+        }
+    }
+    return answer
+}
+
+export func local_health_url(target) {
+    if type(target) != "string" {
+        return false
+    }
+    return regex_match(target, "^https?://(localhost|127[.]0[.]0[.]1|\\[::1\\])(:[0-9]{1,5})?([/?#][^[:space:]]*)?$")
 }

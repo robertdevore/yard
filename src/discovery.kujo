@@ -1,0 +1,38 @@
+# Discovery returns suggestions only. Neither path inspection nor registering
+# a detected service grants possession of a process.
+from src.ports import scan_listeners, process_identity, valid_pid
+from src.supervisor import supervisor
+from src.util import expand_home
+
+export func discover_projects(root) {
+    if type(root) != "string" || len(root) > 4096 {
+        return {"ok": false, "error": "Enter an absolute project directory"}
+    }
+    return supervisor("discover", {"root": expand_home(root)}, 3000)
+}
+
+export func inspect_listener(pid) {
+    if valid_pid(pid) == false {
+        return {"ok": false, "error": "Invalid process ID"}
+    }
+    scan := scan_listeners()
+    if scan["ok"] == false {
+        return {"ok": false, "error": scan["error"]}
+    }
+    for listener in scan["processes"] {
+        if listener["pid"] == pid {
+            before := process_identity(pid)
+            if before["started"] == null {
+                break
+            }
+            answer := supervisor("inspect", {"pid": pid}, 2400)
+            after := process_identity(pid)
+            if after["started"] == before["started"] && answer["ok"] {
+                answer["receipt"]["process_started"] := before["started"]
+                return answer
+            }
+            break
+        }
+    }
+    return {"ok": false, "error": "Listener exited or its project could not be inspected"}
+}
