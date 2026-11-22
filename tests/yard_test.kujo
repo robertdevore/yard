@@ -16,7 +16,7 @@ from src.util import truthy, includes, split_ws, last_segment, drop_last_segment
 from src.knownports import known_label, is_known_port, is_sensitive, infer_kind
 from src.config import load, resolve_path, service_for_port, service_by_id
 from src.health import interpret
-from src.ports import parse_lsof
+from src.ports import parse_lsof, parse_lsof_listeners, valid_pid
 from src.status import summarize
 from src.web import index_html
 
@@ -127,6 +127,14 @@ func test_parse_lsof() {
     check_eq(first["pid"], 12345, "first pid")
     check_eq(first["process_name"], "node", "first command name")
     check_eq(first["user"], "dev", "first user")
+    listeners := parse_lsof_listeners(sample + "\n" + sample)
+    check_eq(len(listeners), 4, "control scan preserves distinct listeners and ignores repeated rows")
+    shared := sample + "\nredis-server 7777 dev 2u IPv4 0x1 0t0 TCP 127.0.0.2:3000 (LISTEN)"
+    check_eq(len(parse_lsof_listeners(shared)), 5, "control scan preserves distinct PIDs on one port")
+    check_eq(len(parse_lsof(shared)), 3, "display scan still yields one row per port")
+    check_eq(len(parse_lsof("node -1 dev 2u IPv4 0x1 0t0 TCP *:3000 (LISTEN)")), 0, "invalid PID is ignored")
+    check_eq(len(parse_lsof("node 12 dev 2u IPv4 0x1 0t0 TCP *:65536 (LISTEN)")), 0, "invalid port is ignored")
+    check(valid_pid(2147483648) == false, "PID outside the operating-system range is rejected")
     check(type(parse_lsof("")) == "array", "empty input yields array")
     check_eq(len(parse_lsof("garbage line with too few cols")), 0, "garbage parses to nothing")
 }
@@ -145,8 +153,7 @@ func lsof_sample() {
 # ---------------------------------------------------------------------------
 
 func test_config() {
-    dir := join_path(env_or("TMPDIR", "/tmp"), "yard-test-${now()}")
-    create_dir(dir)
+    dir := create_temp_dir(env_or("TMPDIR", "/tmp"), "yard-test-")
 
     # Missing file -> empty, not an error.
     miss := load(join_path(dir, "nope.json"))
@@ -215,7 +222,8 @@ func test_config() {
     write_json(bad_id, bad_id_config())
     bicfg := load(bad_id)
     check_eq(len(bicfg["services"]), 1, "invalid ids are skipped")
-    check(len(bicfg["errors"]) >= 3, "invalid ids reported")
+    check(len(bicfg["errors"]) == 6, "invalid ids reported")
+    spawn_process(["rm", "-r", "--", dir])
 }
 
 func valid_config() {
@@ -263,6 +271,9 @@ func bad_id_config() {
             {"id": "", "port": 3000},
             {"id": "../escape", "port": 3001},
             {"id": "has space", "port": 3002},
+            {"id": "..", "port": 3004},
+            {"id": ".", "port": 3005},
+            {"id": 123, "port": 3006},
             {"id": "good.id_1-2", "port": 3003}
         ]
     }

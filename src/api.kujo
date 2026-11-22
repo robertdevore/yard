@@ -14,9 +14,8 @@
 
 from src.util import truthy, iso_now
 from src.config import load, resolve_path, service_by_id
-from src.ports import scan, pids_on_port, full_command, pid_alive
-from src.knownports import is_sensitive
-from src.process import start_service, stop_service, restart_service, stop_pid
+from src.ports import scan, valid_pid
+from src.process import control_service, control_listeners
 from src.state import read_logs
 from src.status import build_services, summarize
 
@@ -36,9 +35,9 @@ func config_meta(config) {
 }
 
 # GET /api/services — full service list + summary.
-export func services_payload(do_health, timeout_secs) {
+export func services_payload(do_health, timeout_secs, server_port) {
     config := load_cfg()
-    built := build_services(config, do_health, timeout_secs)
+    built := build_services(config, do_health, timeout_secs, server_port)
     summary := summarize(built["services"])
     return {
         "ok": built["ok"],
@@ -51,9 +50,9 @@ export func services_payload(do_health, timeout_secs) {
 }
 
 # GET /api/summary — just the summary cards + config health.
-export func summary_payload(do_health, timeout_secs) {
+export func summary_payload(do_health, timeout_secs, server_port) {
     config := load_cfg()
-    built := build_services(config, do_health, timeout_secs)
+    built := build_services(config, do_health, timeout_secs, server_port)
     return {
         "ok": built["ok"],
         "generated_at": iso_now(),
@@ -74,128 +73,38 @@ export func ports_payload() {
     }
 }
 
-# POST /api/services/:id/start
-export func start_action(id) {
-    svc := require_service(id)
-    if type(svc) == "string" {
-        return err(svc)
+export func service_action(id, action, force, confirm) {
+    services := load_cfg()["services"]
+    svc := service_by_id(services, id)
+    if type(svc) != "dict" {
+        return err("no such managed service: '${id}'")
     }
-    res := start_service(svc)
-    return action_result(res, "start", id)
+    return action_result(control_service(svc, services, action, force, confirm), action, id)
 }
 
-# POST /api/services/:id/stop  (body: {force, confirm})
-export func stop_action(id, force, confirm) {
-    svc := require_service(id)
-    if type(svc) == "string" {
-        return err(svc)
-    }
-    sensitive := truthy(svc["sensitive"]) || is_sensitive(svc["port"], svc["start"])
-    guard := confirm_guard(sensitive, force, confirm)
-    if type(guard) == "string" {
-        return needs_confirm(guard)
-    }
-    live_pid := first_pid(pids_on_port(svc["port"]))
-    res := stop_service(svc, live_pid, force)
-    return action_result(res, "stop", id)
-}
-
-# POST /api/services/:id/restart  (body: {confirm})
-export func restart_action(id, confirm) {
-    svc := require_service(id)
-    if type(svc) == "string" {
-        return err(svc)
-    }
-    if type(svc["start"]) == "null" || "${svc["start"]}" == "" {
-        return err("service '${id}' has no 'start' command; cannot restart")
-    }
-    sensitive := truthy(svc["sensitive"]) || is_sensitive(svc["port"], svc["start"])
-    if sensitive && truthy(confirm) == false {
-        return needs_confirm("restarting sensitive service '${id}' requires confirmation")
-    }
-    live_pid := first_pid(pids_on_port(svc["port"]))
-    res := restart_service(svc, live_pid)
-    return action_result(res, "restart", id)
-}
-
-# POST /api/processes/:pid/stop  (body: {force, confirm}) — for unknown procs.
 export func stop_process_action(pid, force, confirm) {
-    if type(pid) != "int" || pid <= 0 {
+    if valid_pid(pid) == false {
         return err("invalid pid")
     }
-    sensitive := process_is_sensitive(pid)
-    guard := confirm_guard(sensitive, force, confirm)
-    if type(guard) == "string" {
-        return needs_confirm(guard)
-    }
-    res := stop_pid(pid, force)
+    res := control_listeners(load_cfg()["services"], null, pid, force, confirm)
     return action_result(res, "stop-process", "${pid}")
 }
 
-# GET /api/services/:id/logs
+export func stop_port_action(port, force, confirm) {
+    return control_listeners(load_cfg()["services"], port, null, force, confirm)
+}
+
 export func logs_payload(id, max_lines) {
-    svc := require_service(id)
-    if type(svc) == "string" {
-        return err(svc)
-    }
-    return {
-        "ok": true,
-        "id": id,
-        "lines": read_logs(id, max_lines)
-    }
-}
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-# Resolve a managed service by id, or return an error string if not found.
-func require_service(id) {
-    config := load_cfg()
-    svc := service_by_id(config["services"], id)
+    svc := service_by_id(load_cfg()["services"], id)
     if type(svc) != "dict" {
-        return "no such managed service: '${id}'"
+        return err("no such managed service: '${id}'")
     }
-    return svc
-}
-
-# Decide whether an action is allowed without further confirmation. Returns a
-# string reason when confirmation is REQUIRED, or true when clear to proceed.
-func confirm_guard(sensitive, force, confirm) {
-    if truthy(force) && truthy(confirm) == false {
-        return "force stop requires explicit confirmation"
+    try {
+        log := read_logs(id, max_lines)
+        return {"ok": true, "id": id, "lines": log["lines"], "truncated": log["truncated"]}
+    } except e {
+        return err("could not read logs for '${id}': ${e}")
     }
-    if sensitive && truthy(confirm) == false {
-        return "stopping a sensitive service requires explicit confirmation"
-    }
-    return true
-}
-
-func process_is_sensitive(pid) {
-    s := scan()
-    procs := s["processes"]
-    mut i := 0
-    n := len(procs)
-    while i < n {
-        p := procs[i]
-        i = i + 1
-        if p["pid"] == pid {
-            cmd := full_command(pid)
-            cmd_text := p["process_name"]
-            if type(cmd) != "null" {
-                cmd_text = cmd
-            }
-            return is_sensitive(p["port"], cmd_text)
-        }
-    }
-    return false
-}
-
-func first_pid(pids) {
-    if len(pids) >= 1 {
-        return pids[0]
-    }
-    return null
 }
 
 func action_result(res, action, target) {
@@ -205,6 +114,9 @@ func action_result(res, action, target) {
         "action": action,
         "target": target,
         "error": res["error"]
+    }
+    if truthy(get(res, "needs_confirm")) {
+        return {"ok": false, "needs_confirm": true, "error": res["error"]}
     }
     if truthy(has_key(res, "pid")) {
         out["pid"] := res["pid"]
@@ -220,8 +132,4 @@ func action_result(res, action, target) {
 
 func err(message) {
     return {"ok": false, "error": message}
-}
-
-func needs_confirm(message) {
-    return {"ok": false, "needs_confirm": true, "error": message}
 }

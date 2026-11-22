@@ -10,55 +10,33 @@
 
 from src.serve import serve
 from src.config import resolve_path, load, service_by_id
-from src.api import load_cfg
-from src.ports import scan, full_command, pids_on_port
-from src.process import start_service, stop_service, restart_service, stop_pid
+from src.api import load_cfg, service_action, stop_port_action
 from src.status import build_services, summarize
-from src.knownports import is_sensitive
-from src.util import truthy, display, pad_right, pad_left, shell_quote
+from src.util import truthy, display, pad_right, shell_quote, includes, is_http_url
 
 VERSION := "0.1.0"
 DEFAULT_PORT := 9753
 
-# Split tokens into positionals and flags. Flags in `bool_flags` are valueless
-# switches; any other --flag consumes the next token as its value.
-func parse_args(tokens, bool_flags) {
+# Yard's command switches are all valueless. Reject unknown switches and
+# extra arguments before any command can act on a service.
+func parse_args(tokens, bool_flags, max_positionals) {
     mut positionals := []
     mut flags := {}
-    mut i := 0
-    n := len(tokens)
-    while i < n {
-        tok := tokens[i]
-        if starts_with(tok, "--") {
-            key := substring(tok, 2, len(tok))
-            if includes(bool_flags, key) {
-                flags[key] := true
-            } else {
-                if i + 1 < n {
-                    flags[key] := tokens[i + 1]
-                    i = i + 1
-                } else {
-                    flags[key] := ""
-                }
+    for token in tokens {
+        if starts_with(token, "--") {
+            name := substring(token, 2, len(token))
+            if includes(bool_flags, name) == false {
+                return {"error": "unknown option '${token}'"}
             }
+            flags[name] := true
         } else {
-            positionals = push(positionals, tok)
+            positionals = push(positionals, token)
         }
-        i = i + 1
     }
-    return {"positionals": positionals, "flags": flags}
-}
-
-func includes(arr, value) {
-    mut inc_i := 0
-    inc_n := len(arr)
-    while inc_i < inc_n {
-        if arr[inc_i] == value {
-            return true
-        }
-        inc_i = inc_i + 1
+    if len(positionals) > max_positionals {
+        return {"error": "too many arguments"}
     }
-    return false
+    return {"positionals": positionals, "flags": flags, "error": null}
 }
 
 func has_flag(parsed, name) {
@@ -78,37 +56,69 @@ func positional(parsed, idx) {
 # ---------------------------------------------------------------------------
 
 func cmd_serve(tokens) {
-    parsed := parse_args(tokens, [])
-    port := DEFAULT_PORT
-    pf := positional(parsed, 0)
-    envp := env_or("YARD_PORT", "")
-    if type(pf) != "null" {
-        port = parse_int(pf)
-    } else {
-        if envp != "" {
-            port = parse_int(envp)
-        }
+    parsed := parse_args(tokens, [], 1)
+    if parsed["error"] != null {
+        print("error: ${parsed["error"]}")
+        return 2
     }
-    if type(port) != "int" {
-        port = DEFAULT_PORT
+    port := dashboard_port(positional(parsed, 0))
+    if type(port) != "int" || port < 1 || port > 65535 {
+        print("error: server port must be 1–65535")
+        return 2
     }
-    return serve(port)
+    try {
+        return serve(port)
+    } except e {
+        print("error: could not serve Yard: ${e}")
+        return 1
+    }
+}
+
+func dashboard_port(explicit) {
+    if type(explicit) != "null" {
+        return parse_int(explicit)
+    }
+    configured := env_or("YARD_PORT", "")
+    if configured == "" {
+        return DEFAULT_PORT
+    }
+    return parse_int(configured)
 }
 
 func cmd_scan(tokens) {
-    parsed := parse_args(tokens, ["json", "no-health"])
+    parsed := parse_args(tokens, ["json", "no-health"], 0)
+    if parsed["error"] != null {
+        print("error: ${parsed["error"]}")
+        return 2
+    }
     do_health := has_flag(parsed, "no-health") == false
     config := load_cfg()
-    built := build_services(config, do_health, "1")
+    built := build_services(config, do_health, "1", null)
     services := built["services"]
     if has_flag(parsed, "json") {
-        print(to_json_pretty({"summary": summarize(services), "services": services}))
+        payload := {"summary": summarize(services), "services": services}
+        if built["ok"] == false {
+            payload["scan_error"] := built["scan_error"]
+        }
+        print(to_json_pretty(payload))
+        if built["ok"] == false {
+            return 1
+        }
         return 0
     }
     if built["scan_error"] != null {
         print("scanner: ${built["scan_error"]}")
     }
+    for error in config["errors"] {
+        print("config error: ${error}")
+    }
+    for warning in config["warnings"] {
+        print("config warning: ${warning}")
+    }
     if len(services) == 0 {
+        if built["ok"] == false {
+            return 1
+        }
         print("No localhost services detected.")
         print("Add managed services to your Yard config or start a dev server.")
         return 0
@@ -117,6 +127,9 @@ func cmd_scan(tokens) {
     s := summarize(services)
     print("")
     print("running ${s["running_ports"]}  managed ${s["managed_running"]}/${s["managed_total"]}  unknown ${s["unknown_ports"]}  unhealthy ${s["unhealthy"]}  sensitive ${s["sensitive"]}  untracked ${s["untracked"]}")
+    if built["ok"] == false {
+        return 1
+    }
     return 0
 }
 
@@ -156,115 +169,84 @@ func resolve_svc(id) {
     return svc
 }
 
-func cmd_start(tokens) {
-    parsed := parse_args(tokens, [])
-    id := positional(parsed, 0)
-    if type(id) == "null" {
-        print("usage: yard start <id>")
+func cmd_service(tokens, action, flags, success_msg) {
+    parsed := parse_args(tokens, flags, 1)
+    if parsed["error"] != null {
+        print("error: ${parsed["error"]}")
         return 2
     }
-    svc := resolve_svc(id)
-    if type(svc) == "null" {
-        return 1
-    }
-    res := start_service(svc)
-    return report(res, "Started ${id} (pid ${display(res["pid"])})")
-}
-
-func cmd_stop(tokens) {
-    parsed := parse_args(tokens, ["force", "yes"])
     id := positional(parsed, 0)
     if type(id) == "null" {
-        print("usage: yard stop <id> [--force] [--yes]")
-        return 2
-    }
-    svc := resolve_svc(id)
-    if type(svc) == "null" {
-        return 1
-    }
-    force := has_flag(parsed, "force")
-    sensitive := truthy(svc["sensitive"]) || is_sensitive(svc["port"], svc["start"])
-    if (force || sensitive) && has_flag(parsed, "yes") == false {
-        kind := "force-stop"
-        if sensitive {
-            kind = "stop sensitive service"
+        usage := "usage: yard ${action} <id>"
+        for flag in flags {
+            usage = usage + " [--${flag}]"
         }
-        print("refusing to ${kind} '${id}' without --yes (safety).")
-        return 1
-    }
-    live := first_pid(pids_on_port(svc["port"]))
-    res := stop_service(svc, live, force)
-    return report(res, "Stopped ${id}")
-}
-
-func cmd_restart(tokens) {
-    parsed := parse_args(tokens, ["yes"])
-    id := positional(parsed, 0)
-    if type(id) == "null" {
-        print("usage: yard restart <id> [--yes]")
+        print(usage)
         return 2
     }
-    svc := resolve_svc(id)
-    if type(svc) == "null" {
+    res := service_action(id, action, has_flag(parsed, "force"), has_flag(parsed, "yes"))
+    if truthy(get(res, "needs_confirm")) {
+        print("refusing to ${action} '${id}' without --yes: ${res["error"]}")
         return 1
     }
-    sensitive := truthy(svc["sensitive"]) || is_sensitive(svc["port"], svc["start"])
-    if sensitive && has_flag(parsed, "yes") == false {
-        print("refusing to restart sensitive service '${id}' without --yes (safety).")
-        return 1
+    message := "${success_msg} ${id}"
+    if action != "stop" {
+        message = message + " (pid ${display(get(res, "pid"))})"
     }
-    live := first_pid(pids_on_port(svc["port"]))
-    res := restart_service(svc, live)
-    return report(res, "Restarted ${id} (pid ${display(res["pid"])})")
+    return report(res, message)
 }
 
 func cmd_stop_port(tokens) {
-    parsed := parse_args(tokens, ["force", "yes"])
+    parsed := parse_args(tokens, ["force", "yes"], 1)
+    if parsed["error"] != null {
+        print("error: ${parsed["error"]}")
+        return 2
+    }
     pf := positional(parsed, 0)
     if type(pf) == "null" {
         print("usage: yard stop-port <port> [--force] [--yes]")
         return 2
     }
     port := parse_int(pf)
-    if type(port) != "int" {
+    if type(port) != "int" || port < 1 || port > 65535 {
         print("error: invalid port '${pf}'")
         return 2
     }
-    pids := pids_on_port(port)
-    if len(pids) == 0 {
-        print("nothing listening on port ${port}")
-        return 0
-    }
-    force := has_flag(parsed, "force")
-    sensitive := is_sensitive(port, null)
-    if (force || sensitive) && has_flag(parsed, "yes") == false {
-        print("refusing to stop port ${port} without --yes (force or sensitive).")
+    res := stop_port_action(port, has_flag(parsed, "force"), has_flag(parsed, "yes"))
+    if truthy(get(res, "needs_confirm")) {
+        print("refusing to stop port ${port} without --yes: ${res["error"]}")
         return 1
     }
-    mut i := 0
-    mut bad := 0
-    while i < len(pids) {
-        pid := pids[i]
-        i = i + 1
-        res := stop_pid(pid, force)
-        if truthy(res["ok"]) {
+    if type(get(res, "stopped")) == "array" {
+        for pid in res["stopped"] {
             print("stopped pid ${pid} on port ${port}")
-        } else {
-            print("failed to stop pid ${pid}: ${display(res["error"])}")
-            bad = bad + 1
         }
     }
-    if bad > 0 {
-        return 1
+    if res["ok"] == false {
+        return report(res, "")
+    }
+    if len(res["stopped"]) == 0 {
+        print("nothing listening on port ${port}")
     }
     return 0
 }
 
 func cmd_open(tokens) {
-    parsed := parse_args(tokens, [])
+    parsed := parse_args(tokens, [], 1)
+    if parsed["error"] != null {
+        print("error: ${parsed["error"]}")
+        return 2
+    }
     id := positional(parsed, 0)
-    url := "http://127.0.0.1:${DEFAULT_PORT}"
-    if type(id) != "null" {
+    url := null
+    if id == null {
+        port := dashboard_port(null)
+        if type(port) != "int" || port < 1 || port > 65535 {
+            print("error: server port must be 1–65535")
+            return 2
+        }
+        url = "http://127.0.0.1:${port}"
+    } else {
         svc := resolve_svc(id)
         if type(svc) == "null" {
             return 1
@@ -274,6 +256,10 @@ func cmd_open(tokens) {
         } else {
             url = "http://127.0.0.1:${svc["port"]}"
         }
+    }
+    if is_http_url(url) == false {
+        print("error: open URL must use HTTP or HTTPS")
+        return 1
     }
     quoted := shell_quote(url)
     r := execute_status("open " + quoted + " || xdg-open " + quoted)
@@ -286,7 +272,11 @@ func cmd_open(tokens) {
 }
 
 func cmd_config(tokens) {
-    parsed := parse_args(tokens, [])
+    parsed := parse_args(tokens, [], 1)
+    if parsed["error"] != null {
+        print("error: ${parsed["error"]}")
+        return 2
+    }
     sub := positional(parsed, 0)
     path := resolve_path(null)
     if sub == "path" || type(sub) == "null" {
@@ -300,13 +290,6 @@ func cmd_config(tokens) {
     }
     print("usage: yard config [path|show]")
     return 2
-}
-
-func first_pid(pids) {
-    if len(pids) >= 1 {
-        return pids[0]
-    }
-    return null
 }
 
 func report(res, ok_msg) {
@@ -368,13 +351,13 @@ export func main(argv) {
         return cmd_open(rest)
     }
     if cmd == "start" {
-        return cmd_start(rest)
+        return cmd_service(rest, "start", [], "Started")
     }
     if cmd == "stop" {
-        return cmd_stop(rest)
+        return cmd_service(rest, "stop", ["force", "yes"], "Stopped")
     }
     if cmd == "restart" {
-        return cmd_restart(rest)
+        return cmd_service(rest, "restart", ["yes"], "Restarted")
     }
     if cmd == "stop-port" {
         return cmd_stop_port(rest)

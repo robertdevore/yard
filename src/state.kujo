@@ -6,7 +6,7 @@
 # (default ./.yard) so it survives the dashboard process restarting. Logs for
 # managed services are captured to ./.yard/logs/<id>.log.
 
-from src.util import truthy, iso_now
+from src.util import truthy, iso_now, shell_quote
 
 # Root state directory: $YARD_DIR or ./.yard in the working directory.
 export func state_dir() {
@@ -38,34 +38,30 @@ export func ensure_dirs() {
     }
 }
 
-# Load the managed-state map (id -> entry). Returns {} on missing/corrupt file
-# rather than failing, so a bad state file never bricks the dashboard.
+# Display remains available when a state file is unreadable. Control actions
+# use the strict reader so they never replace unreadable state with an empty map.
 export func load_state() {
+    try {
+        return load_control_state()
+    } except e {
+        return {}
+    }
+}
+
+export func load_control_state() {
     p := state_path()
     if file_exists(p) == false {
         return {}
     }
-    mut parsed := null
-    try {
-        parsed = parse_json(read_file(p))
-    } except e {
-        return {}
-    }
+    parsed := parse_json(read_file(p))
     if type(parsed) != "dict" {
-        return {}
+        throw("managed state must be a JSON object: ${p}")
     }
     return parsed
 }
 
-# Persist the managed-state map. Uses delete-then-write because the VM's
-# write_file overwrite flag is unreliable.
 export func save_state(state) {
-    ensure_dirs()
-    p := state_path()
-    if file_exists(p) {
-        delete_file(p)
-    }
-    write_file(p, to_json_pretty(state))
+    return write_file_atomic(state_path(), to_json_pretty(state), true)
 }
 
 export func get_entry(state, id) {
@@ -76,9 +72,10 @@ export func get_entry(state, id) {
 }
 
 # A fresh entry for a service Yard has just started.
-export func new_entry(pid, log_file, start_cmd, restart_count) {
+export func new_entry(pid, process_started, log_file, start_cmd, restart_count) {
     return {
         "pid": pid,
+        "process_started": process_started,
         "started_at": iso_now(),
         "restart_count": restart_count,
         "log_file": log_file,
@@ -87,29 +84,41 @@ export func new_entry(pid, log_file, start_cmd, restart_count) {
     }
 }
 
-# Tail the last `max_lines` lines of a managed service's log file. Returns an
-# array of strings (possibly empty). Never throws on a missing file.
+# Bound the data read and returned even when the active log has grown large.
+# Reading a suffix may split its first line, which is discarded when clipped.
 export func read_logs(id, max_lines) {
     p := log_path(id)
-    if file_exists(p) == false {
-        return []
+    if file_exists(p) == false || max_lines <= 0 {
+        return {"lines": [], "truncated": false}
     }
-    raw := read_file(p)
-    lines := split(raw, "\n")
-    n := len(lines)
+    if path_is_file(p) == false {
+        throw("service log is not a regular file")
+    }
+    max_bytes := 262144
+    r := execute_status("tail -c ${max_bytes} < " + shell_quote(p), {"max_output_bytes": max_bytes, "timeout_ms": 2000})
+    if r.exitcode != 0 {
+        throw("could not read service log: ${trim(r.stderr)}")
+    }
+    clipped := r.stdout_truncated || file_size(p) > max_bytes
+    lines := split(r.stdout, "\n")
+    end := len(lines)
+    if lines[end - 1] == "" {
+        end = end - 1
+    }
     start := 0
-    if n > max_lines {
-        start = n - max_lines
+    if clipped {
+        start = 1
+    }
+    if end - max_lines > start {
+        start = end - max_lines
+        clipped = true
     }
     mut out := []
-    mut i := start
-    while i < n {
-        line := lines[i]
-        i = i + 1
-        if line == "" {
-            continue
+    while start < end {
+        if lines[start] != "" {
+            out = push(out, lines[start])
         }
-        out = push(out, line)
+        start = start + 1
     }
-    return out
+    return {"lines": out, "truncated": clipped}
 }

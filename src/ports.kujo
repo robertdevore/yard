@@ -8,78 +8,83 @@
 # Only read-only inspection commands are ever run here (lsof, ps). Nothing in
 # this module signals, starts, or stops a process.
 
-from src.util import truthy, includes, split_ws, last_segment, drop_last_segment
+from src.util import truthy, split_ws, last_segment, drop_last_segment
 
 # Run the listener scan. Returns:
 #   { "ok": bool, "error": str|null, "processes": [DetectedProcess, ...] }
 # A DetectedProcess is:
 #   { pid, port, address, protocol, ip_version, process_name, command, user, raw }
 export func scan() {
-    cmd := "lsof -nP -iTCP -sTCP:LISTEN +c 0"
-    r := execute_status(cmd)
-    out := "${r.stdout}"
-    if trim(out) == "" {
-        if r.exitcode != 0 {
-            return {
-                "ok": false,
-                "error": "lsof unavailable or returned no output (exit ${r.exitcode}). On macOS/Linux install lsof, or run Yard with sufficient permissions.",
-                "processes": []
-            }
-        }
-        return {"ok": true, "error": null, "processes": []}
-    }
-    processes := parse_lsof(out)
-    return {"ok": true, "error": null, "processes": processes}
+    result := scan_listeners()
+    result["listeners"] := result["processes"]
+    result["processes"] := unique_ports(result["listeners"])
+    return result
 }
 
-# Parse raw `lsof` stdout into DetectedProcess dicts, de-duplicated by port.
-# Exposed so tests can exercise the parser without invoking lsof.
+# Keep separate listeners for control decisions. The status and raw ports
+# views retain their established one-row-per-port shape.
+export func scan_listeners() {
+    r := execute_status("lsof -nP -iTCP -sTCP:LISTEN +c 0")
+    output := trim(r.stdout)
+    stderr := trim(r.stderr)
+    parsed := parse_listener_rows(output)
+    processes := parsed["processes"]
+    if r.stdout_truncated || parsed["skipped"] > 0 {
+        return {"ok": false, "error": "listener scan incomplete; lsof returned truncated or unrecognized rows", "processes": processes}
+    }
+    if r.exitcode == 0 || (r.exitcode == 1 && output == "" && stderr == "") {
+        return {"ok": true, "error": null, "processes": processes}
+    }
+    detail := "listener scan failed (lsof exit ${r.exitcode}); check installation and permissions"
+    return {"ok": false, "error": detail, "processes": processes}
+}
+
 export func parse_lsof(text) {
+    return unique_ports(parse_lsof_listeners(text))
+}
+
+func unique_ports(listeners) {
     mut processes := []
-    mut seen_ports := []
-    lines := split(text, "\n")
-    mut li := 0
-    ln := len(lines)
-    while li < ln {
-        line := trim(lines[li])
-        li = li + 1
-        if line == "" {
-            continue
+    mut seen := {}
+    for listener in listeners {
+        key := "${listener["port"]}"
+        if truthy(has_key(seen, key)) == false {
+            seen[key] := true
+            processes = push(processes, listener)
         }
-        tokens := split_ws(line)
-        if len(tokens) < 9 {
-            continue
-        }
-        if tokens[0] == "COMMAND" {
-            continue
-        }
-        parsed := parse_lsof_row(tokens, line)
-        if type(parsed) == "null" {
-            continue
-        }
-        port := parsed["port"]
-        if port_seen(seen_ports, port) {
-            continue
-        }
-        seen_ports = push(seen_ports, port)
-        processes = push(processes, parsed)
     }
     return processes
 }
 
-# Local membership check using uniquely-named locals to avoid the VM's
-# variable-aliasing quirk when helpers are called inside a hot loop that shares
-# `i`/`n` names with its callees.
-func port_seen(arr, value) {
-    mut pi := 0
-    pn := len(arr)
-    while pi < pn {
-        if arr[pi] == value {
-            return true
+export func parse_lsof_listeners(text) {
+    return parse_listener_rows(text)["processes"]
+}
+
+func parse_listener_rows(text) {
+    mut processes := []
+    mut seen := {}
+    mut skipped := 0
+    for raw in split(text, "\n") {
+        line := trim(raw)
+        tokens := split_ws(line)
+        if len(tokens) == 0 || (len(tokens) >= 2 && tokens[0] == "COMMAND" && tokens[1] == "PID") {
+            continue
         }
-        pi = pi + 1
+        listener := null
+        if len(tokens) >= 9 {
+            listener = parse_lsof_row(tokens, line)
+        }
+        if type(listener) == "null" {
+            skipped = skipped + 1
+            continue
+        }
+        key := "${listener["pid"]}:${listener["port"]}:${listener["address"]}"
+        if truthy(has_key(seen, key)) == false {
+            seen[key] := true
+            processes = push(processes, listener)
+        }
     }
-    return false
+    return {"processes": processes, "skipped": skipped}
 }
 
 # Turn one tokenized lsof row into a DetectedProcess, or null if it does not
@@ -101,7 +106,7 @@ func parse_lsof_row(tokens, raw) {
     if type(port) != "int" {
         return null
     }
-    if port <= 0 {
+    if port <= 0 || port > 65535 {
         return null
     }
     address := drop_last_segment(name, ":")
@@ -114,6 +119,9 @@ func parse_lsof_row(tokens, raw) {
     }
     process_name := tokens[0]
     pid := parse_int(tokens[1])
+    if valid_pid(pid) == false {
+        return null
+    }
     user := tokens[2]
     return {
         "pid": pid,
@@ -132,7 +140,7 @@ func parse_lsof_row(tokens, raw) {
 # gone or ps is unavailable. Used to enrich display ("node server.js") and to
 # refine sensitive-service detection.
 export func full_command(pid) {
-    if type(pid) != "int" {
+    if valid_pid(pid) == false {
         return null
     }
     r := execute_status("ps -o command= -p ${pid}")
@@ -146,31 +154,26 @@ export func full_command(pid) {
     return cmd
 }
 
-# True if a PID is currently alive (signal 0 probes without affecting it).
-export func pid_alive(pid) {
-    if type(pid) != "int" {
-        return false
-    }
-    r := execute_status("kill -0 ${pid}")
-    return r.exitcode == 0
+export func valid_pid(pid) {
+    return type(pid) == "int" && pid > 0 && pid <= 2147483647
 }
 
-# Find the listening PID(s) for a given port by re-scanning. Returns an array of
-# ints (usually 0 or 1). Used by the stop-port CLI command.
-export func pids_on_port(port) {
-    s := scan()
-    mut out := []
-    procs := s["processes"]
-    mut i := 0
-    n := len(procs)
-    while i < n {
-        p := procs[i]
-        if p["port"] == port {
-            if includes(out, p["pid"]) == false {
-                out = push(out, p["pid"])
-            }
-        }
-        i = i + 1
+# Read the process start time and state in one call. A reused PID must never
+# inherit a tracked service's authorization to be signaled.
+export func process_identity(pid) {
+    if valid_pid(pid) == false {
+        return {"started": null, "error": "invalid pid"}
     }
-    return out
+    r := execute_status("LC_ALL=C ps -p ${pid} -o stat= -o lstart=")
+    fields := split_ws(trim(r.stdout))
+    if r.exitcode == 1 && len(fields) == 0 && trim(r.stderr) == "" {
+        return {"started": null, "error": null}
+    }
+    if r.exitcode != 0 || len(fields) != 6 {
+        return {"started": null, "error": "could not inspect pid ${pid}: ${trim(r.stderr)}"}
+    }
+    if substring(fields[0], 0, 1) == "Z" {
+        return {"started": null, "error": null}
+    }
+    return {"started": join([fields[1], fields[2], fields[3], fields[4], fields[5]], " "), "error": null}
 }

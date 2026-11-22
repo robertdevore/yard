@@ -50,7 +50,8 @@ conflict.
 
 ## Running it
 
-Yard runs on the Kujo interpreter, so you need a `kujo` binary.
+Yard runs with `kujo run` on macOS and Linux. Use Kujo 1.5.0 or newer with
+`lsof`, `ps`, `curl`, and the standard POSIX shell utilities on your PATH.
 
 ```bash
 # 1. Get this project
@@ -91,7 +92,7 @@ yard start kujo-site      # start a managed service
 yard stop kujo-site       # graceful stop
 yard stop kujo-site --force --yes   # force kill (requires --yes)
 yard restart kujo-site    # restart a managed service
-yard stop-port 3000       # stop whatever listens on a port
+yard stop-port 3000       # stop all detected listeners on a port
 yard config path          # print the config file path
 yard config show          # dump the parsed config
 yard version
@@ -109,13 +110,14 @@ lsof -nP -iTCP -sTCP:LISTEN +c 0
 ```
 
 It parses each row into a `DetectedProcess` (port, bind address, PID, process
-name, user, protocol, raw line) and de-duplicates by port (IPv4 + IPv6 rows for
-the same port collapse to one). For each PID it tries `ps -o command= -p <pid>`
-to recover the full command line, which improves both display and sensitive-
-service detection.
+name, user, protocol, raw line). The dashboard and scan output show one row per
+port and look up each displayed PID's command once per scan. Process actions
+use all detected listeners, including PIDs hidden by the display deduplication.
 
-If `lsof` is missing or returns nothing, Yard reports a scanner error in the UI
-banner and keeps working with whatever it has — it never crashes the dashboard.
+An empty successful scan is normal. When `lsof` fails or returns incomplete
+results, the dashboard shows the rows it could read alongside a scanner banner.
+Process actions require a complete scan. `yard scan` exits 1 on scanner failure
+and the JSON output includes `scan_error` alongside any partial results.
 
 Each detected port is then:
 
@@ -131,7 +133,7 @@ Each detected port is then:
 For each non-sensitive service Yard runs:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code} %{time_total}' --max-time 1 <url>
+curl -q -g -s -o /dev/null -w '%{http_code} %{time_total}' --proto '=http,https' --max-time 1 -- <url>
 ```
 
 against the config `health` URL if present, otherwise the inferred
@@ -146,8 +148,9 @@ against the config `health` URL if present, otherwise the inferred
 | `unknown`  | not probed, refused, or health disabled            |
 
 The HTTP status code and response time (ms) are captured when available.
-Sensitive services are deliberately **not** probed over HTTP — pinging a
-Postgres socket is pointless and just adds noise — so they show as `not_http`.
+Yard reports sensitive listeners as `not_http` without probing them. The
+dashboard skips probes to its own loopback address and port. Turn off health
+checks for a fast scan that only reads listener and process metadata.
 
 ---
 
@@ -190,32 +193,44 @@ Minimal example:
 | `cwd`         | no       | working directory for `start`; `~` is expanded               |
 | `start`       | no       | the **only** command Yard will run for this service          |
 | `health`      | no       | health-check URL (defaults to inferred `http://127.0.0.1:port`) |
-| `open`        | no       | URL for the Open action / `yard open`                        |
+| `open`        | no       | HTTP(S) URL for the Open action / `yard open`                |
 | `sensitive`   | no       | force-mark as sensitive (extra confirmation to stop)         |
-| `tags`        | no       | array of strings, surfaced in Inspect                        |
+| `tags`        | no       | optional labels retained in the parsed config                |
 | `description` | no       | free text, surfaced in Inspect                               |
 
 A bare top-level array (`[ {...}, {...} ]`) is also accepted. Duplicate `id`s
 and duplicate `port`s produce warnings (shown in the UI) rather than errors; the
-first wins. A missing config is fine — you simply get a read-only view of
-detected ports. Invalid JSON is reported as a banner, not a crash.
+first wins. With a missing config, Yard still shows and can stop detected
+listeners. An invalid config is reported in the dashboard and CLI scan output.
 
 ## Starting / stopping / restarting
 
-* **Start** runs *only* the service's configured `start` command, in its
-  configured `cwd`, detached, with stdout+stderr captured to
-  `./.yard/logs/<id>.log`. The new PID, start time, and a restart counter are
-  recorded in `./.yard/managed.json`.
-* **Stop** sends `SIGTERM` (graceful) by default. It targets the live listening
-  PID, falling back to the PID Yard recorded at start.
-* **Force stop** sends `SIGKILL` and requires an explicit confirmation in the UI
-  (and `--yes` on the CLI).
-* **Restart** is stop-then-start, available only for managed services that have
-  a `start` command. It bumps the restart counter.
-* **Unknown processes** can be stopped or force-stopped by PID, but never
-  started or restarted (Yard has no command for them).
+* **Start** launches the configured command in `cwd`, with stdout and stderr
+  captured in `./.yard/logs/<id>.log`. The configured port must be free. The
+  log is replaced on each launch. Yard records the PID and process start time
+  in `./.yard/managed.json`.
+* **Stop** sends `SIGTERM` to the sole detected listener on the configured port.
+  When the port is empty, Yard can stop a process it started if the recorded
+  PID and process start time still match. For older entries that stored only a
+  PID, wait for the process to listen or stop it directly outside Yard.
+* **Force stop** sends `SIGKILL` and requires confirmation in the UI or `--yes`
+  on the CLI.
+* **Restart** validates the launch settings, sends `SIGTERM`, waits for the old
+  process to exit, and checks the port before launching the replacement. When
+  the process fails to exit within the wait window, Yard reports the failure
+  and leaves the replacement unstarted. A successful restart increments the
+  counter once.
+* **Stop by PID or port** applies to currently detected TCP listeners. If a
+  managed port has multiple distinct listeners, service-level stop and restart
+  ask you to inspect them before acting.
 
-State and logs live under `./.yard` by default (override with `$YARD_DIR`).
+CLI and dashboard actions share a lock and atomically update managed state.
+State and logs live in `./.yard` by default. Point `YARD_DIR` at a trusted,
+user-owned directory, and use the same path for the CLI and dashboard.
+If managed state is unreadable, preserve the file and restore a valid copy
+before running managed actions. Use a foreground executable for `start`. For
+setup or pipelines, point `start` at a script that uses `exec` for the final
+service so Yard tracks its PID.
 
 ---
 
@@ -225,10 +240,10 @@ Yard is local command-and-control, so it is conservative by design:
 
 1. **Loopback only.** The server binds to `127.0.0.1`, never `0.0.0.0`. It is
    not reachable from other machines.
-2. **Action token.** Every destructive (`POST`) endpoint requires a per-session
-   token that is embedded in the dashboard page. Same-origin scripts can act; a
-   malicious cross-origin page can neither read nor guess the token, so it can't
-   forge stop/start requests.
+2. **Local HTTP authority and action token.** Connect via `127.0.0.1` or
+   `localhost` at the configured port. Requests with an Origin header must
+   match that address. Every action requires the session token embedded in the
+   dashboard. The dashboard refuses framing.
 3. **No arbitrary commands.** The browser can never send a command to run. Start
    and restart execute *only* the `start` string from your local config file.
    There is no shell passthrough anywhere in the API.
@@ -238,15 +253,15 @@ Yard is local command-and-control, so it is conservative by design:
    (UI modal / `--yes`).
 6. **Sensitive services are guarded.** Postgres, MySQL, Redis, MongoDB, Docker
    daemons, Ollama, Elasticsearch, RabbitMQ, etc. (by port or command, or
-   `"sensitive": true` in config) require extra confirmation before stopping and
-   are never HTTP-probed.
+   `"sensitive": true` in config) require extra confirmation before stopping or
+   restarting. Protection applies across every detected port belonging to the
+   same PID, including for health probes.
 7. **Restart is managed-only.** Unknown processes are never restarted.
 8. **No destructive defaults.** Nothing is stopped, killed, or started unless
    you ask for it.
-9. **Shell-safe.** Config values are POSIX single-quote escaped before use, so
-   metacharacters can't break out of the intended command.
-
-You should be able to leave Yard running locally without fear.
+9. **Local config is trusted code.** The `start` command uses shell syntax. Yard
+   quotes filesystem paths separately and uses HTTP(S) URLs for probes and
+   browser actions.
 
 ## Architecture
 
@@ -266,7 +281,8 @@ src/
   web.kujo           the single-page dashboard (self-contained HTML/CSS/JS)
   serve.kujo         HTTP routes, 127.0.0.1 binding, token enforcement
   cli.kujo           command dispatch
-tests/yard_test.kujo hand-rolled test harness
+tests/yard_test.kujo module regression tests
+tests/integration.sh isolated CLI, process, and loopback HTTP tests
 ```
 
 The layering keeps future features (Docker integration, MCP/Ollama detection, a
@@ -291,8 +307,10 @@ All responses are JSON except `GET /`.
 | POST   | `/api/processes/:pid/stop`         | stop an unknown process                |
 | POST   | `/api/processes/:pid/force-stop`   | force-stop an unknown process          |
 
-GET endpoints accept `?health=0` to skip health probing. POST bodies must
-include `"token": "<session token>"`.
+The summary and service list accept `?health=0` to skip probing. POST bodies
+must include `"token": "<session token>"`. The logs endpoint returns up to
+300 lines from the most recent 256 KiB, with `truncated` set when it returns
+an excerpt.
 
 ## Tests
 
@@ -302,15 +320,21 @@ kujo run tests/yard_test.kujo
 KUJO=/path/to/kujo ./tests/run.sh
 ```
 
-The suite (72 checks) covers config parsing (valid, missing, invalid JSON, bare
-array, duplicate ids/ports, missing required fields), managed/unmanaged matching
-by port, known-port detection, sensitive-service detection (by port and by
-command), health-status parsing, the `lsof` parser (including dedupe and
-garbage tolerance), and the summary aggregation.
+For state, process control and the real HTTP routes, run the isolated
+integration suite.
+
+```bash
+./tests/integration.sh
+```
+
+The module tests cover config validation, sensitivity, health interpretation,
+listener parsing and display deduplication. The integration suite uses disposable
+processes and a loopback dashboard to check concurrent starts, restart failures,
+stale state, request guards, health probes and log bounds.
 
 ## Troubleshooting
 
-* **"lsof unavailable" banner** — install `lsof`, or check permissions. Yard
+* **"listener scan failed" banner** — install `lsof`, or check permissions. Yard
   only reads listening sockets; it never needs root.
 * **A managed service shows `untracked`** — a process is listening on its
   configured port, but its PID does not match Yard's stored state. This is
@@ -320,7 +344,7 @@ garbage tolerance), and the summary aggregation.
   `./.yard/logs/<id>.log`; the process likely exited immediately (bad command,
   wrong `cwd`, missing dependency).
 * **Health shows `not_http` for a web app** — it may not be answering on the
-  inferred URL; set an explicit `health` URL in config.
+  inferred URL. Set an explicit `health` URL in config.
 * **Health shows `timeout`** — the service is slow or hung; Yard caps probes at
   1s so the dashboard stays responsive.
 * **403 on an action** — the page's action token expired (server restarted).
@@ -329,10 +353,12 @@ garbage tolerance), and the summary aggregation.
 ## Known limitations
 
 * TCP listeners only (no UDP); macOS/Linux only (relies on `lsof`/`ps`/`curl`).
-* The HTTP server is single-threaded; a self-referential health check (a managed
-  service whose health URL points at Yard itself) will wait out the 1s timeout.
-* No process *tree* management — stopping a service signals the PID Yard started
-  or the listening PID, not arbitrary descendants.
+* Health probes run serially and each can take up to 1s. Large fleets with
+  several unresponsive listeners can take multiple seconds to scan.
+* Yard signals individual processes. Service wrappers should forward signals or
+  replace themselves with the service using `exec`.
+* PID and start-time comparisons precede the OS signal. PID reuse between a
+  check and signal remains possible. Keep Yard scoped to your own local services.
 * Logs are captured only for services Yard started; externally-started processes
   have no logs to show.
 * The action token lives for the server session; restarting Yard invalidates

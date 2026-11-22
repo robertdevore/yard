@@ -14,7 +14,7 @@
 
 from src.web import index_html
 from src.api import services_payload, summary_payload, ports_payload
-from src.api import start_action, stop_action, restart_action, stop_process_action, logs_payload
+from src.api import service_action, stop_process_action, logs_payload
 from src.util import truthy
 from src.state import ensure_dirs
 
@@ -24,11 +24,13 @@ LOG_LINES := 300
 
 # Action token for this server session. Set by serve() before listening.
 mut YARD_TOKEN := ""
+mut YARD_PORT := 0
 
 # Start the dashboard on the loopback interface at `port`. Blocks until killed.
 export func serve(port) {
     ensure_dirs()
-    YARD_TOKEN = gen_token()
+    YARD_TOKEN = reveal(secure_random_token(32))
+    YARD_PORT = port
 
     print("")
     print("  Yard - localhost command center")
@@ -50,40 +52,20 @@ func config_hint() {
     return env_or("YARD_CONFIG", "yard.config.json")
 }
 
-# Generate a hard-to-guess session token. Prefers uuidgen; falls back to a
-# time-seeded value if uuidgen is unavailable.
-func gen_token() {
-    r := execute_status("uuidgen")
-    t := trim("${r.stdout}")
-    if t != "" {
-        return t
-    }
-    return "yard-${now()}-${rand_int(1000000)}"
-}
-
-func rand_int(n) {
-    r := execute_status("echo $RANDOM")
-    v := parse_int(trim("${r.stdout}"))
-    if type(v) == "int" {
-        return v
-    }
-    return 0
-}
-
 # Construct the routed server. Each handler is a thin closure delegating to a
 # top-level helper so the request logic stays testable and readable.
 func build_server(port) {
     srv := http_listen(HOST, port)
-    srv := srv.route("GET", "/", func(req) { return h_index(req) })
-    srv := srv.route("GET", "/api/summary", func(req) { return h_summary(req) })
-    srv := srv.route("GET", "/api/services", func(req) { return h_services(req) })
-    srv := srv.route("GET", "/api/ports", func(req) { return h_ports(req) })
-    srv := srv.route("GET", "/api/services/:id/logs", func(req) { return h_logs(req) })
-    srv := srv.route("POST", "/api/services/:id/start", func(req) { return h_start(req) })
-    srv := srv.route("POST", "/api/services/:id/stop", func(req) { return h_stop(req) })
-    srv := srv.route("POST", "/api/services/:id/restart", func(req) { return h_restart(req) })
-    srv := srv.route("POST", "/api/processes/:pid/stop", func(req) { return h_proc_stop(req) })
-    srv := srv.route("POST", "/api/processes/:pid/force-stop", func(req) { return h_proc_force(req) })
+    srv := srv.route("GET", "/", func(req) { return guarded(req, h_index) })
+    srv := srv.route("GET", "/api/summary", func(req) { return guarded(req, h_summary) })
+    srv := srv.route("GET", "/api/services", func(req) { return guarded(req, h_services) })
+    srv := srv.route("GET", "/api/ports", func(req) { return guarded(req, h_ports) })
+    srv := srv.route("GET", "/api/services/:id/logs", func(req) { return guarded(req, h_logs) })
+    srv := srv.route("POST", "/api/services/:id/start", func(req) { return guarded(req, h_start) })
+    srv := srv.route("POST", "/api/services/:id/stop", func(req) { return guarded(req, h_stop) })
+    srv := srv.route("POST", "/api/services/:id/restart", func(req) { return guarded(req, h_restart) })
+    srv := srv.route("POST", "/api/processes/:pid/stop", func(req) { return guarded(req, h_proc_stop) })
+    srv := srv.route("POST", "/api/processes/:pid/force-stop", func(req) { return guarded(req, h_proc_force) })
     return srv
 }
 
@@ -91,20 +73,45 @@ func build_server(port) {
 # Handlers
 # ---------------------------------------------------------------------------
 
+# The socket is loopback-bound. Check the HTTP authority as well, since
+# browsers can reach a loopback address through a non-local DNS name.
+func guarded(req, handler) {
+    headers := req["header_values"]
+    hosts := get(headers, "host")
+    if type(hosts) != "array" || len(hosts) != 1 {
+        return deny_host()
+    }
+    host := to_lower(hosts[0])
+    if host != "127.0.0.1:${YARD_PORT}" && host != "localhost:${YARD_PORT}" &&
+        (YARD_PORT != 80 || (host != "127.0.0.1" && host != "localhost")) {
+        return deny_host()
+    }
+    origins := get(headers, "origin")
+    if type(origins) != "null" && (len(origins) != 1 || origins[0] != "http://${host}") {
+        return deny_host()
+    }
+    return set_header(handler(req), "Cache-Control", "no-store")
+}
+
+func deny_host() {
+    return json_response(403, {"ok": false, "error": "request requires the local Yard origin"})
+}
+
 func h_index(req) {
     html := index_html(YARD_TOKEN)
     resp := http_response(200, html)
     resp := set_header(resp, "Content-Type", "text/html; charset=utf-8")
-    resp := set_header(resp, "Cache-Control", "no-store")
+    resp := set_header(resp, "X-Frame-Options", "DENY")
+    resp := set_header(resp, "Content-Security-Policy", "frame-ancestors 'none'; base-uri 'none'")
     return resp
 }
 
 func h_summary(req) {
-    return json_response(200, summary_payload(want_health(req), HEALTH_TIMEOUT))
+    return json_response(200, summary_payload(want_health(req), HEALTH_TIMEOUT, YARD_PORT))
 }
 
 func h_services(req) {
-    return json_response(200, services_payload(want_health(req), HEALTH_TIMEOUT))
+    return json_response(200, services_payload(want_health(req), HEALTH_TIMEOUT, YARD_PORT))
 }
 
 func h_ports(req) {
@@ -121,7 +128,7 @@ func h_start(req) {
     if token_ok(body) == false {
         return deny()
     }
-    return json_response(200, start_action(req["params"]["id"]))
+    return json_response(200, service_action(req["params"]["id"], "start", false, false))
 }
 
 func h_stop(req) {
@@ -129,7 +136,7 @@ func h_stop(req) {
     if token_ok(body) == false {
         return deny()
     }
-    return json_response(200, stop_action(req["params"]["id"], bflag(body, "force"), bflag(body, "confirm")))
+    return json_response(200, service_action(req["params"]["id"], "stop", bflag(body, "force"), bflag(body, "confirm")))
 }
 
 func h_restart(req) {
@@ -137,7 +144,7 @@ func h_restart(req) {
     if token_ok(body) == false {
         return deny()
     }
-    return json_response(200, restart_action(req["params"]["id"], bflag(body, "confirm")))
+    return json_response(200, service_action(req["params"]["id"], "restart", false, bflag(body, "confirm")))
 }
 
 func h_proc_stop(req) {

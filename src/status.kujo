@@ -6,44 +6,55 @@
 # "sensitive", "which actions are safe", and "is this managed listener tracked
 # by Yard" are all decided. It performs read-only inspection only.
 
-from src.util import truthy, includes
-from src.ports import scan, full_command
-from src.config import service_for_port
-from src.knownports import known_label, is_sensitive, infer_kind
+from src.util import truthy
+from src.ports import scan, full_command, process_identity
+from src.knownports import known_label, is_sensitive, infer_kind, sensitive_listener
 from src.health import check, skipped
 from src.state import load_state, get_entry
 
 # Build the full ServiceStatus list. `do_health` gates the (slower) HTTP probes
 # so callers can ask for a fast structural view. Returns:
 #   { "ok": bool, "scan_error": str|null, "services": [ServiceStatus...] }
-export func build_services(config, do_health, health_timeout_secs) {
+export func build_services(config, do_health, health_timeout_secs, server_port) {
     services_cfg := config["services"]
     scan_result := scan()
     detected := scan_result["processes"]
     state := load_state()
 
     mut statuses := []
-    mut seen_ports := []
-
-    mut i := 0
-    n := len(detected)
-    while i < n {
-        p := detected[i]
-        i = i + 1
-        port := p["port"]
-        seen_ports = push(seen_ports, port)
-        svc := service_for_port(services_cfg, port)
-        statuses = push(statuses, status_for_detected(p, svc, state, do_health, health_timeout_secs))
+    mut services_by_port := {}
+    mut commands_by_pid := {}
+    mut seen_ports := {}
+    mut sensitive_pids := {}
+    for service in services_cfg {
+        services_by_port["${service["port"]}"] := service
+    }
+    for listener in detected {
+        pid_key := "${listener["pid"]}"
+        if truthy(has_key(commands_by_pid, pid_key)) == false {
+            commands_by_pid[pid_key] := full_command(listener["pid"])
+        }
+    }
+    for listener in scan_result["listeners"] {
+        pid_key := "${listener["pid"]}"
+        if has_key(commands_by_pid, pid_key) == 0 || has_key(sensitive_pids, pid_key) == 1 {
+            continue
+        }
+        service := get(services_by_port, "${listener["port"]}")
+        if sensitive_listener(listener, service, commands_by_pid[pid_key]) {
+            sensitive_pids[pid_key] := true
+        }
+    }
+    for listener in detected {
+        port_key := "${listener["port"]}"
+        pid_key := "${listener["pid"]}"
+        seen_ports[port_key] := true
+        statuses = push(statuses, status_for_detected(listener, get(services_by_port, port_key), state, commands_by_pid[pid_key], has_key(sensitive_pids, pid_key) == 1, do_health, health_timeout_secs, server_port))
     }
 
-    # Managed services configured but not currently listening anywhere.
-    mut j := 0
-    m := len(services_cfg)
-    while j < m {
-        svc := services_cfg[j]
-        j = j + 1
-        if includes(seen_ports, svc["port"]) == false {
-            statuses = push(statuses, status_for_stopped(svc))
+    for service in services_cfg {
+        if truthy(has_key(seen_ports, "${service["port"]}")) == false {
+            statuses = push(statuses, status_for_stopped(service))
         }
     }
 
@@ -51,24 +62,17 @@ export func build_services(config, do_health, health_timeout_secs) {
 }
 
 # Build a ServiceStatus for a port we actually saw listening.
-func status_for_detected(p, svc, state, do_health, health_timeout_secs) {
+func status_for_detected(p, svc, state, cmd, sensitive, do_health, health_timeout_secs, server_port) {
     port := p["port"]
     pid := p["pid"]
     process_name := p["process_name"]
-    cmd := full_command(pid)
     cmd_text := process_name
     if type(cmd) != "null" {
         cmd_text = cmd
     }
 
     managed := type(svc) == "dict"
-    cfg_sensitive := false
-    if managed {
-        cfg_sensitive = truthy(svc["sensitive"])
-    }
-    sensitive := cfg_sensitive || is_sensitive(port, cmd_text)
-
-    url := inferred_url(port, p["address"])
+    url := inferred_url(port, p["address"], p["ip_version"])
     open_url := url
     if managed && type(svc["open"]) != "null" {
         open_url = svc["open"]
@@ -80,11 +84,12 @@ func status_for_detected(p, svc, state, do_health, health_timeout_secs) {
     started_at := null
     restart_count := 0
     if type(entry) == "dict" {
-        if type(entry["pid"]) == "int" && entry["pid"] == pid {
-            owned = true
+        if get(entry, "pid") == pid && type(get(entry, "process_started")) == "string" {
+            identity := process_identity(pid)
+            owned = identity["started"] == entry["process_started"]
         }
-        started_at = entry["started_at"]
-        if truthy(has_key(entry, "restart_count")) {
+        started_at = get(entry, "started_at")
+        if type(get(entry, "restart_count")) == "int" {
             restart_count = entry["restart_count"]
         }
     }
@@ -92,7 +97,7 @@ func status_for_detected(p, svc, state, do_health, health_timeout_secs) {
     # by Yard. Call that state untracked; it is not evidence of a port conflict.
     untracked := managed && (owned == false)
 
-    health := health_for(svc, managed, sensitive, url, do_health, health_timeout_secs)
+    health := health_for(svc, managed, sensitive, url, do_health, health_timeout_secs, server_port)
 
     name := process_name
     group := "Unknown"
@@ -142,7 +147,7 @@ func status_for_stopped(svc) {
     port := svc["port"]
     sensitive := truthy(svc["sensitive"]) || is_sensitive(port, svc["start"])
     has_start := type(svc["start"]) != "null" && "${svc["start"]}" != ""
-    url := inferred_url(port, "127.0.0.1")
+    url := inferred_url(port, "127.0.0.1", "IPv4")
     open_url := url
     if type(svc["open"]) != "null" {
         open_url = svc["open"]
@@ -185,7 +190,7 @@ func managed_entry(state, svc, managed) {
 }
 
 # Choose a health probe strategy. Sensitive services are never probed over HTTP.
-func health_for(svc, managed, sensitive, url, do_health, health_timeout_secs) {
+func health_for(svc, managed, sensitive, url, do_health, health_timeout_secs, server_port) {
     if do_health == false {
         return skipped("unknown")
     }
@@ -199,12 +204,32 @@ func health_for(svc, managed, sensitive, url, do_health, health_timeout_secs) {
     return check(target, health_timeout_secs)
 }
 
-# Infer a browser URL for a port. Wildcard / loopback binds map to 127.0.0.1.
-func inferred_url(port, address) {
-    host := "127.0.0.1"
-    a := "${address}"
-    if a != "*" && a != "" && a != "127.0.0.1" && a != "[::1]" && a != "::1" && a != "0.0.0.0" {
-        host = a
+func points_to_yard(url, port) {
+    if type(url) != "string" {
+        return false
+    }
+    parts := split(to_lower(url), "/")
+    if len(parts) < 3 || (parts[0] != "http:" && parts[0] != "https:") {
+        return false
+    }
+    host := split(split(parts[2], "?")[0], "#")[0]
+    return host == "127.0.0.1:${port}" || host == "localhost:${port}" || host == "[::1]:${port}" || host == "0.0.0.0:${port}"
+}
+
+# A wildcard listener is reachable on the loopback of its address family.
+func inferred_url(port, address, ip_version) {
+    host := "${address}"
+    if host == "*" || host == "" {
+        host = "127.0.0.1"
+        if ip_version == "IPv6" {
+            host = "[::1]"
+        }
+    }
+    if host == "0.0.0.0" {
+        host = "127.0.0.1"
+    }
+    if host == "::" || host == "[::]" {
+        host = "[::1]"
     }
     if truthy(contains(host, ":")) && substring(host, 0, 1) != "[" {
         host = "[" + host + "]"
@@ -212,9 +237,9 @@ func inferred_url(port, address) {
     return "http://${host}:${port}"
 }
 
-# Which actions the UI should offer. Stop/force-stop are always available on a
-# running process; restart/logs only for managed services with a start command;
-# start only for a managed service that is currently stopped.
+# The UI offers log reads for managed services and restart only when a
+# running managed service has a start command. The API validates actions
+# again against current listener and process state.
 func actions_for(managed, has_start, running) {
     can_restart := managed && has_start
     is_unknown := managed == false

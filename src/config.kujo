@@ -35,7 +35,13 @@ export func load(path) {
     }
     result["exists"] := true
 
-    raw := read_file(path)
+    mut raw := null
+    try {
+        raw = read_file(path)
+    } except e {
+        result["errors"] := ["could not read config: ${e}"]
+        return result
+    }
     mut parsed := null
     try {
         parsed = parse_json(raw)
@@ -104,8 +110,8 @@ func validate_services(raw_services) {
             errors = push(errors, "service #${idx} is missing required 'id'")
             continue
         }
-        id := "${entry["id"]}"
-        if valid_id(id) == false {
+        id := entry["id"]
+        if type(id) != "string" || valid_id(id) == false {
             errors = push(errors, "service #${idx} has an invalid 'id' (use letters, numbers, dot, underscore, or hyphen)")
             continue
         }
@@ -168,7 +174,7 @@ func numeric_string(value) {
 }
 
 func valid_id(id) {
-    if id == "" {
+    if id == "" || id == "." || id == ".." {
         return false
     }
     allowed := "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"

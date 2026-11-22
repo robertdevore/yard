@@ -119,3 +119,14 @@ export func infer_kind(port, cmd) {
     }
     return "other"
 }
+
+
+# A process can own multiple ports. Callers evaluating actions or probes
+# apply this predicate to every observed listener for the PID.
+export func sensitive_listener(listener, svc, cmd) {
+    port := listener["port"]
+    if is_sensitive(port, cmd) || is_sensitive(port, listener["process_name"]) {
+        return true
+    }
+    return type(svc) == "dict" && (truthy(svc["sensitive"]) || is_sensitive(port, svc["start"]))
+}
