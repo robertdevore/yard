@@ -49,6 +49,7 @@ See the registry guide for path precedence and legacy compatibility.
 ## Guides
 
 - [User guide](docs/USER_GUIDE.md)
+- [Local development ports](docs/LOCAL_PORTS.md)
 - [Registry format and migration](docs/SERVICE_REGISTRY.md)
 - [Process lifecycle and recovery](docs/PROCESS_LIFECYCLE.md)
 - [Architecture and API](docs/ARCHITECTURE.md)
