@@ -22,18 +22,6 @@ export func display(value) {
     }
     return "${value}"
 }
-
-# Display a value, substituting a caller-provided fallback when null/empty.
-export func display_or(value, fallback) {
-    if type(value) == "null" {
-        return fallback
-    }
-    if "${value}" == "" {
-        return fallback
-    }
-    return "${value}"
-}
-
 # Right-pad a string with spaces to `width` for fixed-width table columns.
 # Strings longer than width are returned unchanged (no truncation surprises).
 export func pad_right(text, width) {
@@ -43,16 +31,6 @@ export func pad_right(text, width) {
     }
     return out
 }
-
-# Left-pad a string with spaces to `width` (used for right-aligned numbers).
-export func pad_left(text, width) {
-    mut out := "${text}"
-    while len(out) < width {
-        out = " " + out
-    }
-    return out
-}
-
 # Membership test that tolerates the predicate return-type quirks. Works for
 # arrays of strings or numbers.
 # NOTE: helper functions that get called from inside other functions' loops use
@@ -76,26 +54,11 @@ export func includes(arr, value) {
 # This is what `lsof` / `ps` output needs: columns are whitespace-aligned and
 # the builtin split(s, " ") would otherwise produce empty tokens.
 export func split_ws(line) {
-    mut out := []
-    mut cur := ""
-    mut sw_i := 0
-    sw_n := len(line)
-    while sw_i < sw_n {
-        ch := substring(line, sw_i, sw_i + 1)
-        if ch == " " || ch == "	" {
-            if cur != "" {
-                out = push(out, cur)
-                cur = ""
-            }
-        } else {
-            cur = cur + ch
-        }
-        sw_i = sw_i + 1
+    text := trim(line)
+    if text == "" {
+        return []
     }
-    if cur != "" {
-        out = push(out, cur)
-    }
-    return out
+    return regex_split(text, "[ \t]+")
 }
 
 # The last segment of `s` after splitting on `sep` (e.g. the port in
@@ -139,13 +102,14 @@ export func contains_ci(haystack, needle) {
 
 # True if `haystack` contains any of the lowercased substrings in `needles`.
 export func contains_any_ci(haystack, needles) {
-    mut ca_i := 0
-    ca_n := len(needles)
-    while ca_i < ca_n {
-        if contains_ci(haystack, needles[ca_i]) {
+    if type(haystack) == "null" {
+        return false
+    }
+    text := to_lower("${haystack}")
+    for needle in needles {
+        if truthy(contains(text, to_lower(needle))) {
             return true
         }
-        ca_i = ca_i + 1
     }
     return false
 }
@@ -180,4 +144,14 @@ export func expand_home(path) {
 # Round a float to an integer number of milliseconds for display.
 export func to_ms(seconds) {
     return round(seconds * 1000.0)
+}
+
+# Yard opens and probes web URLs only. Check again at the consumer boundary
+# because native callers can bypass config normalization.
+export func is_http_url(url) {
+    if type(url) != "string" || trim(url) != url {
+        return false
+    }
+    lower := to_lower(url)
+    return starts_with(lower, "http://") || starts_with(lower, "https://")
 }

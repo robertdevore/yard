@@ -9,18 +9,31 @@
 #
 # Status vocabulary: healthy | unhealthy | timeout | not_http | unknown.
 
-from src.util import to_ms, shell_quote
+from src.util import to_ms, is_http_url
 
 # Probe `url` with a hard timeout (seconds). Returns:
 #   { "status": str, "http_status": int|null, "response_ms": int|null }
 export func check(url, timeout_secs) {
-    if type(url) == "null" || "${url}" == "" {
+    if is_http_url(url) == false {
         return result("unknown", null, null)
     }
-    secs := "${timeout_secs}"
-    cmd := "curl -s -o /dev/null -w '%{http_code} %{time_total}' --max-time ${secs} " + shell_quote(url)
-    r := execute_status(cmd)
-    return interpret(r.exitcode, "${r.stdout}")
+    secs := parse_float("${timeout_secs}")
+    if (type(secs) != "float" && type(secs) != "int") || secs <= 0 || secs > 60 {
+        return result("unknown", null, null)
+    }
+    mut r := null
+    try {
+        r = spawn_process(
+            ["curl", "-q", "-g", "-s", "-o", "/dev/null", "-w", "%{http_code} %{time_total}", "--proto", "=http,https", "--max-time", "${secs}", "--", url],
+            {"timeout_ms": to_ms(secs) + 1000, "max_output_bytes": 4096}
+        )
+    } except e {
+        return result("unknown", null, null)
+    }
+    if r.timed_out {
+        return result("timeout", null, null)
+    }
+    return interpret(r.exitcode, r.stdout)
 }
 
 # Map a curl exit code + "<http_code> <time_total>" output line into a health
